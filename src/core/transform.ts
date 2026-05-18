@@ -40,6 +40,20 @@ const DEFAULTS: Required<TransformOptions> = {
   cols: 100,
 };
 
+/** Parsed contents of Claude Code's <env> + git status blocks. All optional —
+ *  fields are only populated if the corresponding line is present. */
+export interface EnvFields {
+  /** Working directory at the time `claude` was launched. */
+  cwd?: string;
+  isGitRepo?: boolean;
+  /** Current git branch, parsed from <git_status> or a "Branch:" line. */
+  gitBranch?: string;
+  platform?: string;
+  osVersion?: string;
+  /** "Today's date" as Claude Code reported it (YYYY-MM-DD). */
+  today?: string;
+}
+
 export interface TransformInfo {
   compressed: boolean;
   reason?: string;
@@ -52,6 +66,9 @@ export interface TransformInfo {
   dynamicChars: number;
   /** Number of dynamic blocks detected (<env>, <context>, etc.). */
   dynamicBlockCount: number;
+  /** Parsed env block, if Claude Code injected one. Useful for telemetry
+   *  (per-project compression ratios, etc.). */
+  env?: EnvFields;
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -117,6 +134,39 @@ function splitStaticDynamic(text: string): {
     dynamicText: dynamicParts.join('\n\n'),
     blockCount: dynamicParts.length,
   };
+}
+
+/**
+ * Pull structured fields out of the dynamic slab. Only reads — does not
+ * modify the text. Used purely for telemetry / improvement signals.
+ */
+export function extractEnvFields(dynamicText: string): EnvFields {
+  const out: EnvFields = {};
+  if (!dynamicText) return out;
+
+  const envMatch = /<env>([\s\S]*?)<\/env>/i.exec(dynamicText);
+  if (envMatch) {
+    const body = envMatch[1]!;
+    const cwd = /(?:^|\n)\s*Working directory:\s*(.+?)\s*(?:\n|$)/i.exec(body);
+    if (cwd) out.cwd = cwd[1]!.trim();
+    const gitRepo = /(?:^|\n)\s*Is directory a git repo:\s*(Yes|No)\b/i.exec(body);
+    if (gitRepo) out.isGitRepo = gitRepo[1]!.toLowerCase() === 'yes';
+    const platform = /(?:^|\n)\s*Platform:\s*(.+?)\s*(?:\n|$)/i.exec(body);
+    if (platform) out.platform = platform[1]!.trim();
+    const osVer = /(?:^|\n)\s*OS Version:\s*(.+?)\s*(?:\n|$)/i.exec(body);
+    if (osVer) out.osVersion = osVer[1]!.trim();
+    const today = /(?:^|\n)\s*Today'?s date:\s*(.+?)\s*(?:\n|$)/i.exec(body);
+    if (today) out.today = today[1]!.trim();
+  }
+
+  // Git branch may live in <git_status>, <context name="git">, or just a
+  // "Branch: foo" / "On branch foo" line somewhere in the dynamic slab.
+  const branch =
+    /(?:^|\n)\s*(?:On branch|Branch:)\s*([^\s\n]+)/i.exec(dynamicText) ??
+    /(?:^|\n)\s*Current branch:\s*([^\s\n]+)/i.exec(dynamicText);
+  if (branch) out.gitBranch = branch[1]!.trim();
+
+  return out;
 }
 
 /**
@@ -198,6 +248,9 @@ export async function transformRequest(
   info.staticChars = staticText.length;
   info.dynamicChars = dynamicText.length;
   info.dynamicBlockCount = dynBlocks;
+  // Parse env fields out of the dynamic slab — telemetry only, never mutates.
+  const env = extractEnvFields(dynamicText);
+  if (Object.keys(env).length > 0) info.env = env;
 
   // 2. Optionally fold tool docs into the same image, stubbing originals.
   let toolDocsText = '';

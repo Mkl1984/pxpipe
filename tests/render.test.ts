@@ -174,6 +174,47 @@ describe('transform', () => {
     expect(cached[0].type).toBe('image');
   });
 
+  it('extracts env fields (cwd, platform, today, isGitRepo, branch) into info.env', async () => {
+    const sys =
+      'claude.md\n'.repeat(400) +
+      "<env>\n" +
+      'Working directory: /Users/me/code/pixelpipe\n' +
+      'Is directory a git repo: Yes\n' +
+      'Platform: darwin\n' +
+      'OS Version: Darwin 25.0.0\n' +
+      "Today's date: 2026-05-18\n" +
+      '</env>\n' +
+      '<git_status>\nOn branch main\nnothing to commit\n</git_status>';
+    const body = new TextEncoder().encode(
+      JSON.stringify({
+        model: 'claude',
+        messages: [{ role: 'user', content: 'hi' }],
+        system: sys,
+      }),
+    );
+    const { info } = await transformRequest(body);
+    expect(info.env).toBeDefined();
+    expect(info.env!.cwd).toBe('/Users/me/code/pixelpipe');
+    expect(info.env!.isGitRepo).toBe(true);
+    expect(info.env!.platform).toBe('darwin');
+    expect(info.env!.osVersion).toBe('Darwin 25.0.0');
+    expect(info.env!.today).toBe('2026-05-18');
+    expect(info.env!.gitBranch).toBe('main');
+  });
+
+  it('leaves info.env undefined when there is no <env> block', async () => {
+    const sys = 'claude.md\n'.repeat(400);
+    const body = new TextEncoder().encode(
+      JSON.stringify({
+        model: 'claude',
+        messages: [{ role: 'user', content: 'hi' }],
+        system: sys,
+      }),
+    );
+    const { info } = await transformRequest(body);
+    expect(info.env).toBeUndefined();
+  });
+
   it('passes through when the system prompt is only dynamic blocks', async () => {
     const sys = '<env>\nWorking directory: /tmp\n</env>';
     const body = new TextEncoder().encode(
