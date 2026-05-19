@@ -73,20 +73,32 @@ export interface RecentRow {
 }
 
 /** Aggregate over the whole session. Reset on process restart unless
- *  replay() is called to seed from the JSONL file. */
+ *  replay() is called to seed from the JSONL file.
+ *
+ *  Cost convention: every "effective cost" number is the FULL dollar-
+ *  equivalent bill summed across input + cache_create×1.25 + cache_read×
+ *  0.10 + output×5.0 (output rate / input rate ratio on Opus and Sonnet).
+ *  saved_pct = (baseline - actual) / baseline, i.e. the share of the
+ *  total upstream bill the proxy shaved off — not "% saved on just the
+ *  input portion." Output cost is identical in both actual and baseline
+ *  (the model produces the same response regardless of prompt
+ *  compression), so it cancels in the savings numerator but enlarges
+ *  the denominator, dragging saved_pct toward the conservative whole-
+ *  bill reading. */
 interface Totals {
   requests: number;
   compressedRequests: number;
-  /** Sum of weighted-token cost we actually paid upstream. */
-  effectiveInputActual: number;
-  /** Sum of estimated cost if we had NOT compressed (point estimate). */
-  effectiveInputBaselineEst: number;
-  /** Pessimistic-α baseline (p10 of per-sample α, or fallback low bracket).
+  /** Sum of full-bill dollar-equivalent cost we actually paid upstream
+   *  (input + cache + output, all weighted). */
+  effectiveCostActual: number;
+  /** Sum of estimated full-bill cost if we had NOT compressed (point). */
+  effectiveCostBaseline: number;
+  /** Pessimistic-α baseline (p10 of per-sample α, or wide fallback).
    *  Drives `saved_pct_low` — the conservative bound on claimed savings. */
-  effectiveInputBaselineEstLow: number;
-  /** Optimistic-α baseline (p90 of per-sample α, or fallback high bracket).
+  effectiveCostBaselineLow: number;
+  /** Optimistic-α baseline (p90 of per-sample α, or wide fallback).
    *  Drives `saved_pct_high` — the upper bound on claimed savings. */
-  effectiveInputBaselineEstHigh: number;
+  effectiveCostBaselineHigh: number;
   startedAt: number;
 }
 
@@ -131,16 +143,38 @@ function estImageTokens(
   return imageCount * OPUS_IMAGE_TOKEN_COST;
 }
 
-/** Compute the weighted "effective" input cost of a single upstream call.
- *  Matches Python's formula: input + cache_create*1.25 + cache_read*0.10.
- *  cache_create is billed at 1.25× to amortize the first-turn cost; cache_read
- *  at 0.10× is Anthropic's published rate. */
+/** Output-token rate multiplier. Anthropic charges output at 5× the
+ *  input base rate on Opus 4.x ($75 vs $15 per Mtok) and Sonnet
+ *  ($15 vs $3 per Mtok). Including output in the effective-cost total
+ *  makes saved_pct reflect the FULL dollar bill instead of just the
+ *  input-side share. */
+const OUTPUT_TOKEN_RATE = 5.0;
+
+/** Full-bill dollar-equivalent cost of a single upstream call, summed
+ *  across all four token classes:
+ *    input × 1.00  +  cache_create × 1.25  +  cache_read × 0.10  +  output × 5.0
+ *
+ *  Anthropic's published rates: input=1×, cache_create=1.25×, cache_read=
+ *  0.10× (all referenced to the input base rate), output=5× the input
+ *  rate. Multiply the result by the per-Mtok input rate (e.g. $15/Mtok
+ *  on Opus 4.7) to get dollars.
+ *
+ *  Output is included so that saved_pct reflects the whole bill, not a
+ *  fraction of just the part the proxy touches. Output is identical in
+ *  both `actual` and `baseline` (same prompt → same response), so it
+ *  cancels in the savings numerator but inflates the denominator. */
 function effectiveCost(
   inputTokens: number,
   cacheCreate: number,
   cacheRead: number,
+  outputTokens: number,
 ): number {
-  return inputTokens + cacheCreate * 1.25 + cacheRead * 0.1;
+  return (
+    inputTokens
+    + cacheCreate * 1.25
+    + cacheRead * 0.1
+    + outputTokens * OUTPUT_TOKEN_RATE
+  );
 }
 
 /** Estimate what the call WOULD have cost if we hadn't compressed. Adds back
@@ -227,10 +261,10 @@ export class DashboardState {
   private totals: Totals = {
     requests: 0,
     compressedRequests: 0,
-    effectiveInputActual: 0,
-    effectiveInputBaselineEst: 0,
-    effectiveInputBaselineEstLow: 0,
-    effectiveInputBaselineEstHigh: 0,
+    effectiveCostActual: 0,
+    effectiveCostBaseline: 0,
+    effectiveCostBaselineLow: 0,
+    effectiveCostBaselineHigh: 0,
     startedAt: Date.now() / 1000,
   };
   private latestPng: Uint8Array | null = null;
@@ -286,7 +320,7 @@ export class DashboardState {
     const cr = u?.cache_read_input_tokens ?? 0;
     const haveUsage = u !== undefined && (inp > 0 || out > 0 || cc > 0 || cr > 0);
 
-    const eff = haveUsage ? effectiveCost(inp, cc, cr) : 0;
+    const eff = haveUsage ? effectiveCost(inp, cc, cr, out) : 0;
     // Pull the current empirical fit BEFORE recording — when this event is
     // itself a cold miss it'll feed back into the next request's fit, but
     // for this baseline calc we use whatever rate we have so far. Null
@@ -324,14 +358,14 @@ export class DashboardState {
     const baselineEffHigh =
       haveUsage && compressed ? baselineCost(...args, fitPoint, aHigh) : eff;
 
-    const prevSaved = this.totals.effectiveInputBaselineEst - this.totals.effectiveInputActual;
+    const prevSaved = this.totals.effectiveCostBaseline - this.totals.effectiveCostActual;
     this.totals.requests += 1;
     if (compressed) this.totals.compressedRequests += 1;
-    this.totals.effectiveInputActual += eff;
-    this.totals.effectiveInputBaselineEst += baselineEff;
-    this.totals.effectiveInputBaselineEstLow += baselineEffLow;
-    this.totals.effectiveInputBaselineEstHigh += baselineEffHigh;
-    const savedNow = this.totals.effectiveInputBaselineEst - this.totals.effectiveInputActual;
+    this.totals.effectiveCostActual += eff;
+    this.totals.effectiveCostBaseline += baselineEff;
+    this.totals.effectiveCostBaselineLow += baselineEffLow;
+    this.totals.effectiveCostBaselineHigh += baselineEffHigh;
+    const savedNow = this.totals.effectiveCostBaseline - this.totals.effectiveCostActual;
 
     const row: RecentRow = {
       ts: Date.now() / 1000,
@@ -656,6 +690,7 @@ export class DashboardState {
                   t.input_tokens ?? 0,
                   t.cache_create_tokens ?? 0,
                   t.cache_read_tokens ?? 0,
+                  (t as { output_tokens?: number }).output_tokens ?? 0,
                 ),
               )
             : undefined,
@@ -675,12 +710,12 @@ export class DashboardState {
   // ---- HTTP handlers ------------------------------------------------------
 
   serveStats(): Response {
-    const saved = this.totals.effectiveInputBaselineEst - this.totals.effectiveInputActual;
-    const savedLow = this.totals.effectiveInputBaselineEstLow - this.totals.effectiveInputActual;
-    const savedHigh = this.totals.effectiveInputBaselineEstHigh - this.totals.effectiveInputActual;
+    const saved = this.totals.effectiveCostBaseline - this.totals.effectiveCostActual;
+    const savedLow = this.totals.effectiveCostBaselineLow - this.totals.effectiveCostActual;
+    const savedHigh = this.totals.effectiveCostBaselineHigh - this.totals.effectiveCostActual;
     const pct =
-      this.totals.effectiveInputBaselineEst > 0
-        ? (saved / this.totals.effectiveInputBaselineEst) * 100
+      this.totals.effectiveCostBaseline > 0
+        ? (saved / this.totals.effectiveCostBaseline) * 100
         : 0;
     // Bounds: use the BOUND'S OWN denominator so each rate is internally
     // consistent (a "low baseline" world should compare against itself,
@@ -689,21 +724,25 @@ export class DashboardState {
     // attributed less to text than we actually paid; surface as 0 rather
     // than a negative percentage that confuses the operator.
     const pctLow =
-      this.totals.effectiveInputBaselineEstLow > 0
-        ? Math.max(0, (savedLow / this.totals.effectiveInputBaselineEstLow) * 100)
+      this.totals.effectiveCostBaselineLow > 0
+        ? Math.max(0, (savedLow / this.totals.effectiveCostBaselineLow) * 100)
         : 0;
     const pctHigh =
-      this.totals.effectiveInputBaselineEstHigh > 0
-        ? Math.max(0, (savedHigh / this.totals.effectiveInputBaselineEstHigh) * 100)
+      this.totals.effectiveCostBaselineHigh > 0
+        ? Math.max(0, (savedHigh / this.totals.effectiveCostBaselineHigh) * 100)
         : 0;
     const uptimeSec = Date.now() / 1000 - this.totals.startedAt;
     const payload = {
       requests: this.totals.requests,
       compressed_requests: this.totals.compressedRequests,
-      effective_input_actual: round1(this.totals.effectiveInputActual),
-      effective_input_baseline_est: round1(this.totals.effectiveInputBaselineEst),
-      effective_input_baseline_est_low: round1(this.totals.effectiveInputBaselineEstLow),
-      effective_input_baseline_est_high: round1(this.totals.effectiveInputBaselineEstHigh),
+      // Full-bill dollar-equivalent totals: input + cache + output, all
+      // weighted by Anthropic's published per-class multipliers. saved_pct
+      // is the share of THIS denominator we shaved off, so it answers
+      // "what fraction of my total upstream bill did the proxy reduce?"
+      effective_cost_actual: round1(this.totals.effectiveCostActual),
+      effective_cost_baseline: round1(this.totals.effectiveCostBaseline),
+      effective_cost_baseline_low: round1(this.totals.effectiveCostBaselineLow),
+      effective_cost_baseline_high: round1(this.totals.effectiveCostBaselineHigh),
       saved_effective_tokens: round1(saved),
       saved_effective_tokens_low: round1(Math.max(0, savedLow)),
       saved_effective_tokens_high: round1(Math.max(0, savedHigh)),
@@ -992,7 +1031,7 @@ const DASHBOARD_HTML = `<!doctype html>
   </div>
   <div class="card"><div class="label">tokens saved</div>
     <div class="value pos" id="m_saved">0</div>
-    <div class="small" id="m_saved_sub">effective input tokens</div>
+    <div class="small" id="m_saved_sub">effective tokens (full bill)</div>
   </div>
   <div class="card"><div class="label">$ saved (opus 4.7)</div>
     <div class="value pos" id="m_usd">$0.00</div>
@@ -1000,7 +1039,7 @@ const DASHBOARD_HTML = `<!doctype html>
   </div>
   <div class="card"><div class="label">reduction</div>
     <div class="value pos" id="m_pct">0%</div>
-    <div class="small" id="m_pct_sub">vs uncompressed baseline</div>
+    <div class="small" id="m_pct_sub">share of total bill saved</div>
     <div class="small" id="m_pct_regime" style="margin-top:4px;color:#6e7681"></div>
   </div>
 </div>
@@ -1099,7 +1138,7 @@ async function tick() {
     document.getElementById('m_req_sub').textContent = \`\${s.compressed_requests} compressed\`;
     document.getElementById('m_saved').textContent = numFmt(s.saved_effective_tokens);
     document.getElementById('m_saved_sub').textContent =
-      \`\${numFmt(s.effective_input_actual)} paid · \${numFmt(s.effective_input_baseline_est)} baseline\`;
+      \`\${numFmt(s.effective_cost_actual)} paid · \${numFmt(s.effective_cost_baseline)} baseline\`;
     document.getElementById('m_usd').textContent = \`$\${s.saved_usd_opus47.toFixed(4)}\`;
     // Honesty range. When the p10/p90 spread is ≥5pp we lead with the
     // range INSTEAD of the point estimate — a "30–62%" reading tells the
@@ -1116,8 +1155,8 @@ async function tick() {
       ? \`\${pctLo.toFixed(0)}–\${pctHi.toFixed(0)}%\`
       : \`\${pctPoint.toFixed(1)}%\`;
     document.getElementById('m_pct_sub').textContent = showRange
-      ? \`point \${pctPoint.toFixed(1)}% · vs uncompressed baseline\`
-      : 'vs uncompressed baseline';
+      ? \`point \${pctPoint.toFixed(1)}% · share of total bill saved\`
+      : 'share of total bill saved';
     // Surface which cost-model regime the headline number came from. Three
     // states (mirror the THREE-MODE LADDER in dashboard.ts fitCosts):
     //   joint        — α and β both measured (≥10 samples = high confidence)

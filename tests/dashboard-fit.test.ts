@@ -35,7 +35,12 @@ function ev(args: {
   input: number;
   cacheCreate: number;
   cacheRead: number;
+  output?: number;
+  compressedChars?: number;
+  imageCount?: number;
 }): ProxyEvent {
+  const compressedChars = args.compressedChars ?? 50_000;
+  const imageCount = args.imageCount ?? 5;
   return {
     method: 'POST',
     path: '/v1/messages',
@@ -43,9 +48,9 @@ function ev(args: {
     durationMs: 100,
     info: {
       compressed: true,
-      origChars: args.textChars + 50_000,
-      compressedChars: 50_000,
-      imageCount: 5,
+      origChars: args.textChars + compressedChars,
+      compressedChars,
+      imageCount,
       imageBytes: 200_000,
       imagePixels: args.pixels,
       outgoingTextChars: args.textChars,
@@ -55,7 +60,7 @@ function ev(args: {
     },
     usage: {
       input_tokens: args.input,
-      output_tokens: 50,
+      output_tokens: args.output ?? 50,
       cache_creation_input_tokens: args.cacheCreate,
       cache_read_input_tokens: args.cacheRead,
     },
@@ -304,6 +309,56 @@ describe('DashboardState.fitCosts() — empirical α/β regression', () => {
       expect(stats.saved_pct_high).toBe(0);
     });
 
+    it('output tokens enter the denominator at ×5 (full-bill saved_pct framing)', async () => {
+      // Two runs with IDENTICAL input/cache shape but very different output
+      // counts. saved_pct should DROP when output grows because output is
+      // in the full-bill denominator but doesn't contribute to savings
+      // (the model produces the same response either way).
+      //
+      // Fixture sized so the fallback-α baseline yields POSITIVE savings:
+      // compressedChars=200k × α=0.25 = 50k txtReplaced; imageCount=5 ×
+      // 2500 = 12.5k imgTokens; extraText = 37.5k > 0.
+      const fxArgs = {
+        textChars: 100_000,
+        pixels: 800_000,
+        input: 30_000,
+        cacheCreate: 10_000,
+        cacheRead: 0,
+        compressedChars: 200_000,
+        imageCount: 5,
+      } as const;
+
+      // Run A — small output (50 tokens per turn).
+      const tmpA = makeTmp();
+      const dashA = new DashboardState(tmpA, async () => new Map());
+      for (let i = 0; i < 3; i++) dashA.update(ev({ ...fxArgs, output: 50 }));
+      const statsA = await dashA.serveStats().json();
+
+      // Run B — same input, 100× the output (5000 tokens per turn).
+      const tmpB = makeTmp();
+      const dashB = new DashboardState(tmpB, async () => new Map());
+      for (let i = 0; i < 3; i++) dashB.update(ev({ ...fxArgs, output: 5_000 }));
+      const statsB = await dashB.serveStats().json();
+
+      // Absolute savings (in effective tokens) is INVARIANT under output
+      // change — savings come from compressed input chars, not output.
+      expect(statsA.saved_effective_tokens).toBeGreaterThan(0);
+      expect(statsA.saved_effective_tokens).toBeCloseTo(statsB.saved_effective_tokens, 0);
+
+      // Denominator grew (output added at ×5), so saved_pct must DROP
+      // when output is bigger. This is the full-bill framing the rename
+      // was meant to deliver.
+      expect(statsB.effective_cost_baseline).toBeGreaterThan(statsA.effective_cost_baseline);
+      expect(statsB.saved_pct).toBeLessThan(statsA.saved_pct);
+
+      // Pinned arithmetic check: extra output of (5000-50) × 3 events × 5.0
+      // effective tokens added to BOTH actual and baseline in the B totals.
+      expect(statsB.effective_cost_actual - statsA.effective_cost_actual).toBeCloseTo(
+        (5000 - 50) * 3 * 5.0,
+        0,
+      );
+    });
+
     it('fallback brackets fire during the n<3 warmup, then tighten as samples accumulate', async () => {
       // n=0 events → fit=null → fallback brackets → low/high baselines
       // are accumulated using α_low=0.15 and α_high=0.50 on EACH event.
@@ -317,11 +372,11 @@ describe('DashboardState.fitCosts() — empirical α/β regression', () => {
       expect(statsWarmup.cost_fit).toBeNull();
       // But the HIGH-α baseline is materially bigger than the point
       // baseline (α=0.50 vs fallback 0.25 = 2× the text-replaced tokens).
-      expect(statsWarmup.effective_input_baseline_est_high).toBeGreaterThan(
-        statsWarmup.effective_input_baseline_est,
+      expect(statsWarmup.effective_cost_baseline_high).toBeGreaterThan(
+        statsWarmup.effective_cost_baseline,
       );
-      expect(statsWarmup.effective_input_baseline_est_low).toBeLessThan(
-        statsWarmup.effective_input_baseline_est,
+      expect(statsWarmup.effective_cost_baseline_low).toBeLessThan(
+        statsWarmup.effective_cost_baseline,
       );
     });
   });
