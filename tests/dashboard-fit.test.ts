@@ -379,5 +379,22 @@ describe('DashboardState.fitCosts() — empirical α/β regression', () => {
         statsWarmup.effective_cost_baseline,
       );
     });
+
+    it('pricing_assumptions surfaces the rate used to compute saved_usd_estimated', async () => {
+      // Sourced from docs.anthropic.com/en/docs/about-claude/pricing,
+      // verified 2026-05-19. Locks in: input rate, output multiplier,
+      // both cache write multipliers, and cache read multiplier.
+      const stats = await dash.serveStats().json();
+      expect(stats.pricing_assumptions).toBeDefined();
+      expect(stats.pricing_assumptions.input_per_mtok).toBe(5.0);
+      expect(stats.pricing_assumptions.output_multiplier).toBe(5.0);
+      expect(stats.pricing_assumptions.cache_write_5m_multiplier).toBe(1.25);
+      expect(stats.pricing_assumptions.cache_write_1h_multiplier).toBe(2.0);
+      expect(stats.pricing_assumptions.cache_read_multiplier).toBe(0.1);
+      expect(typeof stats.pricing_assumptions.source).toBe('string');
+      // saved_usd_estimated must be saved_effective_tokens × input_per_mtok / 1e6.
+      const expectedUsd = (stats.saved_effective_tokens * 5.0) / 1e6;
+      expect(stats.saved_usd_estimated).toBeCloseTo(expectedUsd, 4);
+    });
   });
 });

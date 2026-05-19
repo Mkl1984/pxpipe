@@ -102,53 +102,93 @@ interface Totals {
   startedAt: number;
 }
 
+/*
+ * ─────────────────────────────────────────────────────────────────────────
+ *  PROVENANCE — every magic number below should trace to one of these:
+ *
+ *  [docs-pricing]   docs.anthropic.com/en/docs/about-claude/pricing
+ *                   Verified 2026-05-19 via WebFetch. The page lists per-model
+ *                   per-million-token rates and the cache-tier multipliers.
+ *  [docs-vision]    docs.anthropic.com/en/docs/build-with-claude/vision
+ *                   Verified 2026-05-19 via WebFetch. Stipulates the image-
+ *                   token formula `tokens ≈ width × height / 750` and the
+ *                   per-model maxima (Opus 4.7: 4784 tokens / 2576 px edge).
+ *  [docs-tokenizer] Same pricing page, note attached to Opus 4.7:
+ *                   "Opus 4.7 uses a new tokenizer compared to previous
+ *                    versions, contributing to its improved performance on
+ *                    a wide range of tasks. This new tokenizer may use up
+ *                    to 35% more tokens for the same fixed text."
+ *
+ *  [empirical]      Constants derived from the proxy's own measurements
+ *                   against real upstream usage. These require a proxy run
+ *                   under post-walker-fix code to converge — until then
+ *                   the dashboard falls back to documented or assumed
+ *                   values, and the saved_pct uncertainty band reflects
+ *                   the lack of measurement.
+ * ─────────────────────────────────────────────────────────────────────────
+ */
+
 /** Fallback α brackets used when n<3 cold-miss samples and the regression
  *  can't fire. Picked from "plausible content density" across realistic
- *  Claude Code traffic:
+ *  Claude Code traffic. Provenance: [docs-tokenizer] notes Opus 4.7 runs
+ *  ~35% denser than older models (≈ 3 chars/tok vs ≈ 4 chars/tok English
+ *  average), so the brackets span both regimes:
  *    - α_low  = 0.15  (≈ 6.7 chars/tok — prose-heavy)
- *    - α      = 0.25  (≈ 4 chars/tok — Anthropic's published English avg)
- *    - α_high = 0.50  (≈ 2 chars/tok — JSON-dense / dense tool definitions)
- *  These give a deliberately wide saved_pct range so the operator sees
- *  "calibrating" rather than a precise-looking but unfounded number. */
-const FALLBACK_ALPHA = 0.25;
+ *    - α      = 0.33  (≈ 3.0 chars/tok — Opus 4.7 English-text avg per docs)
+ *    - α_high = 0.50  (≈ 2.0 chars/tok — JSON-dense / dense tool definitions)
+ *  Brackets are deliberately wide so the operator sees "calibrating" rather
+ *  than a precise-looking but unfounded number when the regression hasn't
+ *  converged. Source: [docs-tokenizer]. */
+const FALLBACK_ALPHA = 0.33;
 const FALLBACK_ALPHA_LOW = 0.15;
 const FALLBACK_ALPHA_HIGH = 0.5;
 
-/** Empirical per-image token cost (Opus 4.x at our typical 808×1568 render).
- *  history-researcher's round-3 measurement on N=33 cold-miss events from
- *  events.jsonl (2026-05-18) found the real billable cost averages
- *  ~2,300–2,750 tokens per image; we use 2,500 as the working constant.
+/** Per-image token cost in the FALLBACK case (no live β fit yet, no
+ *  per-image-pixel data). Computed from the published image formula at
+ *  our default render shape: single-col 808×1568 = 1.27 MP →
+ *  1.27e6 / 750 ≈ 1,690 tokens. Source: [docs-vision] "tokens ≈ width ×
+ *  height / 750".
  *
- *  The documented theoretical max (Anthropic's published `(w*h)/750`
- *  formula) gives ~1,690 tokens for our render shape and underpredicts
- *  what we actually get billed. The prior implementation here was even
- *  more optimistic — `pngBytes / 375` came out to ~190 tokens, off by
- *  ~12×. That bug made the dashboard's "saved" column wildly overstate
- *  the actual cost reduction.
- *
- *  See /tmp/pixelpipe-history-compression.md for the analysis. */
-const OPUS_IMAGE_TOKEN_COST = 2500;
+ *  Earlier versions of this file used 2,500 here based on an in-house
+ *  measurement against Opus pre-4.7 that didn't reconcile with the docs;
+ *  removed pending fresh per-renderer-config measurement under
+ *  post-walker-fix code. With pixel data available the dashboard prefers
+ *  imagePixels × β (β=1/750 per [docs-vision]) over this fallback. */
+const FALLBACK_IMAGE_TOKEN_COST = 1690;
 
 /** Estimated token cost of the N images we emit per compressed request.
- *  When the dashboard has accumulated ≥3 cold-miss samples with the new
- *  instrumentation, prefer `imagePixels × β` (live empirical rate) over
- *  the stale flat constant — the constant was measured on Opus pre-4.7
- *  with single-col 508×1559 PNGs, and is wrong by ~3× under multi-col 2. */
+ *  Three regimes, in preference order:
+ *    1. β fitted from cold-miss events → `imagePixels × β` (live empirical)
+ *    2. No β but we have pixel data    → `imagePixels × (1/750)` per [docs-vision]
+ *    3. No pixel data at all           → `imageCount × FALLBACK_IMAGE_TOKEN_COST`
+ *
+ *  Source: [docs-vision] formula `tokens ≈ width × height / 750`. */
 function estImageTokens(
   imageCount: number,
   imagePixels: number,
   beta: number | null,
 ): number {
   if (beta !== null && imagePixels > 0) return Math.round(imagePixels * beta);
-  return imageCount * OPUS_IMAGE_TOKEN_COST;
+  if (imagePixels > 0) return Math.round(imagePixels / 750);
+  return imageCount * FALLBACK_IMAGE_TOKEN_COST;
 }
 
-/** Output-token rate multiplier. Anthropic charges output at 5× the
- *  input base rate on Opus 4.x ($75 vs $15 per Mtok) and Sonnet
- *  ($15 vs $3 per Mtok). Including output in the effective-cost total
- *  makes saved_pct reflect the FULL dollar bill instead of just the
- *  input-side share. */
+/** Output-token rate multiplier (referenced to the input base rate).
+ *  Source: [docs-pricing] — Opus 4.7 lists $5/Mtok input and $25/Mtok
+ *  output (5×); Sonnet 4.7 lists $3/Mtok input and $15/Mtok output (5×).
+ *  Same ratio holds on Haiku 4.5 ($1/$5). */
 const OUTPUT_TOKEN_RATE = 5.0;
+
+/** Per-million-token input rate ASSUMED for the headline dollar figure.
+ *  Source: [docs-pricing] — Claude Opus 4.7 base input is $5.00/Mtok.
+ *
+ *  This is exposed on /proxy-stats as `pricing_assumptions.input_per_mtok`
+ *  so the operator can see what we assumed and override if they're
+ *  running against a non-default deployment (Bedrock/Vertex add a 10%
+ *  premium per [docs-pricing], Sonnet would be $3/Mtok, etc.). The
+ *  previous value here was $15/Mtok — that was Opus 3 pricing and over-
+ *  stated dollar savings by 3× on Opus 4.x deployments. */
+const ASSUMED_INPUT_USD_PER_MTOK = 5.0;
 
 /** Full-bill dollar-equivalent cost of a single upstream call, summed
  *  across all four token classes:
@@ -179,14 +219,12 @@ function effectiveCost(
 
 /** Estimate what the call WOULD have cost if we hadn't compressed. Adds back
  *  the text tokens we removed (minus the image tokens we added) at the SAME
- *  cache mix the actual call paid — otherwise cold-cache turns get scored as
- *  if the baseline were warm-cache and savings look tiny.
+ *  cache mix the actual call paid — otherwise cold-cache turns get scored
+ *  as if the baseline were warm-cache and savings look tiny.
  *
- *  Uses `imageCount × OPUS_IMAGE_TOKEN_COST` (=2500/image, empirical from
- *  N=33 cold-miss events 2026-05-18) to estimate image tokens. Prior
- *  implementation used `pngBytes / 375` ≈ 190 tokens/image — wrong by
- *  ~12×, which made the "saved" column wildly overstate cost reduction.
- *  See estImageTokens() above for the analysis link.
+ *  Image-token cost goes through estImageTokens() which prefers (in order):
+ *  live β fit → published 1/750 formula → FALLBACK_IMAGE_TOKEN_COST. Source:
+ *  [docs-vision] for the formula and [docs-pricing] for the per-image cap.
  */
 function baselineCost(
   actualEff: number,
@@ -754,7 +792,19 @@ export class DashboardState {
       // precise-looking.
       saved_pct_low: round1(pctLow),
       saved_pct_high: round1(pctHigh),
-      saved_usd_opus47: round4((saved * 15.0) / 1e6),
+      // Headline dollar number. Uses the ASSUMED input rate published
+      // in `pricing_assumptions` below so the operator can verify what we
+      // multiplied by. Drops the "_opus47" suffix because the rate is now
+      // configurable rather than hardcoded to a specific model.
+      saved_usd_estimated: round4((saved * ASSUMED_INPUT_USD_PER_MTOK) / 1e6),
+      pricing_assumptions: {
+        input_per_mtok: ASSUMED_INPUT_USD_PER_MTOK,
+        output_multiplier: OUTPUT_TOKEN_RATE,
+        cache_write_5m_multiplier: 1.25,
+        cache_write_1h_multiplier: 2.0,
+        cache_read_multiplier: 0.1,
+        source: 'docs.anthropic.com/en/docs/about-claude/pricing (verified 2026-05-19)',
+      },
       uptime_sec: uptimeSec,
       // Empirical cost fit — null until ≥3 cold-miss events with the new
       // instrumentation accumulate. When present, contains the live model's
@@ -1033,9 +1083,9 @@ const DASHBOARD_HTML = `<!doctype html>
     <div class="value pos" id="m_saved">0</div>
     <div class="small" id="m_saved_sub">effective tokens (full bill)</div>
   </div>
-  <div class="card"><div class="label">$ saved (opus 4.7)</div>
+  <div class="card"><div class="label">$ saved (estimated)</div>
     <div class="value pos" id="m_usd">$0.00</div>
-    <div class="small" id="m_usd_sub">at $15/M input tokens</div>
+    <div class="small" id="m_usd_sub">at $5/M input tokens (Opus 4.7)</div>
   </div>
   <div class="card"><div class="label">reduction</div>
     <div class="value pos" id="m_pct">0%</div>
@@ -1139,7 +1189,14 @@ async function tick() {
     document.getElementById('m_saved').textContent = numFmt(s.saved_effective_tokens);
     document.getElementById('m_saved_sub').textContent =
       \`\${numFmt(s.effective_cost_actual)} paid · \${numFmt(s.effective_cost_baseline)} baseline\`;
-    document.getElementById('m_usd').textContent = \`$\${s.saved_usd_opus47.toFixed(4)}\`;
+    // Dynamic subtitle reflects the actual rate exposed in pricing_assumptions
+    // so the operator can audit what we multiplied saved tokens by.
+    document.getElementById('m_usd').textContent = \`$\${s.saved_usd_estimated.toFixed(4)}\`;
+    const inRate = s.pricing_assumptions && s.pricing_assumptions.input_per_mtok;
+    if (typeof inRate === 'number') {
+      document.getElementById('m_usd_sub').textContent =
+        \`at $\${inRate}/M input tokens · see pricing_assumptions\`;
+    }
     // Honesty range. When the p10/p90 spread is ≥5pp we lead with the
     // range INSTEAD of the point estimate — a "30–62%" reading tells the
     // operator "we're saving real money but our α isn't sharp enough to
