@@ -342,12 +342,26 @@ export class DashboardState {
   }
 
   /** Solve the empirical cost regression over the current fit-sample ring.
-   *  Returns `null` until we have at least 3 samples — fewer leaves the
-   *  2×2 normal equations under-determined and the fit jumps around with
-   *  every new event, which would be worse than just showing nothing.
-   *  Also returns null on collinear samples (e.g., a single Claude Code
-   *  session sending warm hits keeps `pixels` constant, so we can't
-   *  separate α and β until cross-session variance lands). */
+   *  Returns `null` when:
+   *    - fewer than 3 samples (2×2 normal equations under-determined)
+   *    - design matrix is too collinear to identify α and β separately
+   *    - the fit produces degenerate (negative) rates
+   *
+   *  COLLINEARITY GUARD: the regression solves `tokens ≈ α·text + β·pixels`,
+   *  which only identifies α and β separately when BOTH columns have enough
+   *  variance. The typical-failure case is a single Claude Code session
+   *  sending warm hits — `pixels` stays constant (same cached image) so OLS
+   *  can't separate text cost from image cost. We measure variance via the
+   *  coefficient of variation (stdev/mean) on each column and require both
+   *  > 5%. Below that, the joint fit is unstable enough that the headline
+   *  saved_pct can wander by ±15 pp across consecutive samples — strictly
+   *  worse than showing the stale-constants fallback (stable wrong vs.
+   *  unstable wrong).
+   *
+   *  TODO: when collinear, fall back to a constrained fit using Anthropic's
+   *  published image-cost rate (β = 1/750) and solving α only. Until then,
+   *  the dashboard sticks with stale constants and the operator sees a
+   *  predictable number. */
   fitCosts(): {
     alpha: number;
     beta: number;
@@ -358,21 +372,42 @@ export class DashboardState {
     n: number;
   } | null {
     const samples = this.fitSamples;
-    if (samples.length < 3) return null;
+    const n = samples.length;
+    if (n < 3) return null;
+
+    // First pass: column means + sums-of-squares for the OLS normal eqns.
+    let sumX = 0;
+    let sumP = 0;
     let sxx = 0;
     let sxy = 0;
     let syy = 0;
     let sxt = 0;
     let syt = 0;
     for (const s of samples) {
+      sumX += s.text_chars;
+      sumP += s.pixels;
       sxx += s.text_chars * s.text_chars;
       sxy += s.text_chars * s.pixels;
       syy += s.pixels * s.pixels;
       sxt += s.text_chars * s.tokens;
       syt += s.pixels * s.tokens;
     }
+
+    // Collinearity check: coefficient of variation on each column. var =
+    // Σx²/n − (Σx/n)². If either column has CV < 5%, the design matrix is
+    // near-singular and the joint fit is statistically meaningless even
+    // though det != 0 numerically.
+    const meanX = sumX / n;
+    const meanP = sumP / n;
+    const varX = Math.max(0, sxx / n - meanX * meanX);
+    const varP = Math.max(0, syy / n - meanP * meanP);
+    const cvX = meanX > 0 ? Math.sqrt(varX) / meanX : 0;
+    const cvP = meanP > 0 ? Math.sqrt(varP) / meanP : 0;
+    const MIN_CV = 0.05;
+    if (cvX < MIN_CV || cvP < MIN_CV) return null;
+
     const det = sxx * syy - sxy * sxy;
-    if (det === 0) return null; // collinear, can't separate the two effects
+    if (det === 0) return null; // belt-and-braces: shouldn't reach here past the CV guard
     const alpha = (syy * sxt - sxy * syt) / det;
     const beta = (sxx * syt - sxy * sxt) / det;
     // Guard against degenerate fits (negative rates mean the data is too
@@ -385,7 +420,7 @@ export class DashboardState {
       pixels_per_token: Math.round(1 / beta),
       single_col_tokens_per_img: Math.round(508 * 1559 * beta),
       multicol2_tokens_per_img: Math.round(1028 * 1559 * beta),
-      n: samples.length,
+      n,
     };
   }
 

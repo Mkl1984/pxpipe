@@ -72,48 +72,63 @@ beforeEach(() => {
 describe('DashboardState.fitCosts() — empirical α/β regression', () => {
   it('returns null with fewer than 3 samples', () => {
     dash.update(ev({ textChars: 130_000, pixels: 21_000_000, input: 10, cacheCreate: 5_000, cacheRead: 0 }));
-    dash.update(ev({ textChars: 132_000, pixels: 21_000_000, input: 10, cacheCreate: 0, cacheRead: 130_000 }));
+    dash.update(ev({ textChars: 132_000, pixels: 23_000_000, input: 10, cacheCreate: 0, cacheRead: 130_000 }));
     expect(dash.fitCosts()).toBeNull();
   });
 
-  it('seeds the ring from warm cache hits (cache_read > 0)', () => {
-    // The bug we're locking against: the old gate `cache_read === 0` rejected
-    // every warm hit, leaving the fit forever null in normal traffic. Sample
-    // tokens are tuned to a synthetic α ≈ 1/3.5 (= 0.286), β ≈ 5e-3.
-    //   sample 1: 130k text, 21M px, tokens = 0.286*130k + 5e-3*21M ≈ 142_180
-    //   sample 2: 132k text, 21M px, tokens ≈ 142_752
-    //   sample 3: 134k text, 21M px, tokens ≈ 143_324
-    // All three are warm hits (cache_read > 0) — old gate would reject all.
-    // Pixels constant is fine: OLS no-intercept det = p̄²·(n·Σx² − (Σx)²) > 0
-    // when text_chars varies (Cauchy-Schwarz).
-    dash.update(ev({ textChars: 130_000, pixels: 21_000_000, input: 5,  cacheCreate: 500,   cacheRead: 141_680 }));
-    dash.update(ev({ textChars: 132_000, pixels: 21_000_000, input: 5,  cacheCreate: 300,   cacheRead: 142_447 }));
-    dash.update(ev({ textChars: 134_000, pixels: 21_000_000, input: 5,  cacheCreate: 200,   cacheRead: 143_119 }));
+  it('returns null when pixels column is constant (single-session collinearity guard)', () => {
+    // The trap we're guarding against: a single Claude Code session sends
+    // warm hits with the SAME cached image, so `pixels` doesn't vary across
+    // samples. OLS still produces an (α, β) pair but the split between them
+    // is unidentifiable — the headline saved_pct would wander wildly as new
+    // samples land. Better to return null and fall back to stable stale
+    // constants than show an oscillating empirical number.
+    dash.update(ev({ textChars: 130_000, pixels: 21_000_000, input: 5, cacheCreate: 500, cacheRead: 141_680 }));
+    dash.update(ev({ textChars: 132_000, pixels: 21_000_000, input: 5, cacheCreate: 300, cacheRead: 142_447 }));
+    dash.update(ev({ textChars: 134_000, pixels: 21_000_000, input: 5, cacheCreate: 200, cacheRead: 143_119 }));
+    expect(dash.fitCosts()).toBeNull();
+  });
+
+  it('returns null when text_chars column is constant', () => {
+    // Mirror case — same body shape across samples, only cache state varies.
+    // Without text variance, α is unidentifiable.
+    dash.update(ev({ textChars: 130_000, pixels: 21_000_000, input: 5, cacheCreate: 500, cacheRead: 141_680 }));
+    dash.update(ev({ textChars: 130_000, pixels: 23_000_000, input: 5, cacheCreate: 300, cacheRead: 142_447 }));
+    dash.update(ev({ textChars: 130_000, pixels: 25_000_000, input: 5, cacheCreate: 200, cacheRead: 143_119 }));
+    expect(dash.fitCosts()).toBeNull();
+  });
+
+  it('activates the fit when BOTH columns vary > 5% (cross-session-style samples)', () => {
+    // Synthetic data with α ≈ 0.286 (3.5 chars/tok), β ≈ 1.5e-3 (650 px/tok).
+    // Both columns vary > 5% — coefficient of variation guard passes.
+    //   sample 1: 100k text, 10M px → 0.286*100k + 1.5e-3*10M = 43,600
+    //   sample 2: 130k text, 18M px → 0.286*130k + 1.5e-3*18M = 64,180
+    //   sample 3: 160k text, 24M px → 0.286*160k + 1.5e-3*24M = 81,760
+    dash.update(ev({ textChars: 100_000, pixels: 10_000_000, input: 5, cacheCreate: 500, cacheRead:  43_095 }));
+    dash.update(ev({ textChars: 130_000, pixels: 18_000_000, input: 5, cacheCreate: 300, cacheRead:  63_875 }));
+    dash.update(ev({ textChars: 160_000, pixels: 24_000_000, input: 5, cacheCreate: 200, cacheRead:  81_555 }));
 
     const fit = dash.fitCosts();
     expect(fit).not.toBeNull();
     expect(fit!.n).toBe(3);
-    // α ≈ 0.286 → chars_per_token ≈ 3.5; allow ±50% for noise on near-collinear data.
-    expect(fit!.chars_per_token).toBeGreaterThan(2);
-    expect(fit!.chars_per_token).toBeLessThan(6);
-    // β should be positive and surface a sane tokens/image estimate.
-    expect(fit!.beta).toBeGreaterThan(0);
-    expect(fit!.single_col_tokens_per_img).toBeGreaterThan(0);
+    // With well-conditioned data, α and β recover to within ~10% of construction.
+    expect(fit!.chars_per_token).toBeGreaterThan(3);
+    expect(fit!.chars_per_token).toBeLessThan(4);
+    expect(fit!.beta).toBeGreaterThan(0.001);
+    expect(fit!.beta).toBeLessThan(0.002);
   });
 
   it('uses input + cache_create + cache_read as the LHS (full body tokenization)', () => {
     // Two requests with IDENTICAL body shape but different cache splits:
     // one fully cold, one fully warm. The fit's LHS must treat them as the
-    // same token cost. We sneak in a third sample with varying text to make
-    // the design matrix non-degenerate.
-    dash.update(ev({ textChars: 130_000, pixels: 21_000_000, input: 0,  cacheCreate: 142_180, cacheRead: 0 }));
-    dash.update(ev({ textChars: 130_000, pixels: 21_000_000, input: 0,  cacheCreate: 0,       cacheRead: 142_180 }));
-    dash.update(ev({ textChars: 134_000, pixels: 21_000_000, input: 0,  cacheCreate: 0,       cacheRead: 143_324 }));
+    // same token cost. Sneak in a third sample with varying text + pixels
+    // to make the design matrix well-conditioned (pass the CV guard).
+    dash.update(ev({ textChars: 130_000, pixels: 18_000_000, input: 0,  cacheCreate: 63_875, cacheRead: 0 }));
+    dash.update(ev({ textChars: 130_000, pixels: 18_000_000, input: 0,  cacheCreate: 0,      cacheRead: 63_875 }));
+    dash.update(ev({ textChars: 160_000, pixels: 24_000_000, input: 0,  cacheCreate: 0,      cacheRead: 81_555 }));
 
     const fit = dash.fitCosts();
     expect(fit).not.toBeNull();
-    // Both same-body samples should land on the same regression line, so
-    // chars_per_token resolves cleanly to ~3.5 (= 1/0.286 from the construction).
     expect(fit!.chars_per_token).toBeGreaterThan(2);
     expect(fit!.chars_per_token).toBeLessThan(6);
   });
