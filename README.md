@@ -1,10 +1,19 @@
 # pixelpipe
 
-**Make Opus see pixels instead of tokens.**
+**Context as UI for LLMs.**
 
-A proxy for Claude Code that intercepts `POST /v1/messages` and renders
-the bulky text inputs as grayscale PNGs, letting Anthropic's vision
-stack OCR them on the way in. The inputs we touch:
+LLMs read text because that's what was around in 2017. Tokenization is an
+accident of how transformers were trained, not a property of how language
+models reason. A modern vision-capable model reads a rendered image of
+structured information at roughly the same fidelity as the JSON that
+produced it — and at a fraction of the token cost, because **pixels carry
+more semantic information per unit of context than serialized text does.**
+
+Pixelpipe is a working demo of that idea. It intercepts Claude Code's
+`POST /v1/messages` calls, takes the bulky static inputs that the model
+would otherwise read as text, renders them into grayscale PNGs using a
+build-time GNU Unifont glyph atlas, and lets Anthropic's vision stack OCR
+them on the way in. The inputs we touch today:
 
 - **`system` field** — Claude Code's base system prompt + `CLAUDE.md`
   project instructions + every loaded **skill**'s SKILL.md + agent
@@ -22,19 +31,21 @@ stack OCR them on the way in. The inputs we touch:
   Code injects these for things like task-tracker state, file-state
   hints, and skill discovery; they grow with session length.
 
-What we leave as text: the recent live turns, anything under the
-break-even threshold, and the dynamic per-turn variable section
-(suppressed via Claude Code's `--exclude-dynamic-system-prompt-sections`
-flag so the cached image stays byte-identical).
+The current implementation renders flat text into monospace PNGs, which
+is the cheapest shape to validate the hypothesis on. The same idea
+generalizes to richer encodings — HTML system prompts with semantic
+hierarchy, tool docs as call graphs, file trees as tree renderings,
+conversation history as designed timelines, tables as actual tables.
+Concatenating text is how 2024-era prompt engineering works; designing a
+visual surface is what context-as-UI looks like.
 
-One measured cold-miss event went from **173,783** input tokens to
-**41,321** `cache_create` tokens (~76% fewer tokens billed, ~70% in
-dollars after the 1.25× `cache_create` premium). Warm hits get a
-smaller margin because both paths pay 0.1× `cache_read`. **100%
-reasoning quality preserved**, **byte-identical fixed text** every turn
-for a clean prompt-cache hit.
+One measured cold-miss event in `events.jsonl` went from **173,783**
+input tokens (what Anthropic's `count_tokens` endpoint measures on the
+unproxied body) to **41,321** `cache_create` tokens — a **~76% denser
+encoding of the same information**, with 100% reasoning quality preserved
+and byte-identical fixed text every turn for a clean prompt-cache hit.
 
-> **Why this works now.** Pre-4.7 vision wasn't accurate enough on
+> **Why this works in 2026.** Pre-4.7 vision wasn't accurate enough on
 > dense monospace glyphs — OCR errors would corrupt the prompt before
 > the model read it. Opus 4.7's vision stack ([released 2026-04-16](https://www.anthropic.com/news/claude-opus-4-7))
 > bumps the long-edge image cap from 1568 px to 2576 px (3.3× more
@@ -42,6 +53,24 @@ for a clean prompt-cache hit.
 > ([DocVQA 87→94%, ChartQA 80→88%](https://www.anthropic.com/news/claude-opus-4-7))
 > to make this trade safe. Pixelpipe still renders at 1568×1568 — the
 > *model* OCR fidelity is what changed, not the renderer.
+
+## What this is NOT
+
+- **Not ToS evasion.** Pixelpipe uses the [Anthropic vision API](https://docs.anthropic.com/en/docs/build-with-claude/vision)
+  exactly as documented. Image tokens are billed at the documented input
+  rate. No reverse-engineering, no rate-limit circumvention, no API
+  abuse — every encoded byte traverses Anthropic's stack under the same
+  per-request budgets and content policies as a plain-text request.
+- **Not a billing loophole.** The savings come from genuinely shipping
+  fewer tokens, measured by Anthropic's own `count_tokens` endpoint
+  before and after the encoding change. If Anthropic re-prices images
+  tomorrow, the encoding-density argument still stands — text is just no
+  longer the cheaper modality.
+- **Not a cost-arbitrage tool.** The token reduction is the *measurable
+  proof* that pixels pack more semantic info than serialized text. The
+  actual claim — and the reason this repo exists — is that the LLM
+  context window deserves to be designed like a UI, not concatenated
+  like a log file. Cost is a side effect of density.
 
 Runs on **Node 18+** and **Cloudflare Workers** from the same source.
 
