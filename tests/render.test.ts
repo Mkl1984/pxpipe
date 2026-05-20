@@ -1709,18 +1709,17 @@ describe('transform', () => {
     expect(isCompressionProfitable(40000)).toBe(true);
   });
 
-  // --- Live-α override: gate auto-tunes when dashboard's chars/token diverges ---
+  // --- chars/token override: gate accepts a per-request value ---
   //
   // The default `CHARS_PER_TOKEN = 4` corresponds to Anthropic's English
-  // average (α=0.25). Real Claude Code traffic has α≈0.5-0.9 — JSON-dense
-  // tool definitions, structured CLAUDE.md slabs, etc. tokenize at 1.1-2
-  // chars/tok. The gate now accepts a per-request override so the host
-  // (node.ts) can pipe dashboardState.fitCosts().chars_per_token through.
+  // average. Real Claude Code traffic tokenizes denser — JSON-dense tool
+  // definitions, structured CLAUDE.md slabs, etc. The gate accepts a
+  // per-request override so the host can pass a deployment-specific value.
   //
   // Production trace 2026-05-19: a 169_632-char slab with 88 lines of
   // markdown got `not_profitable` rejected because the gate used 4 ch/tok
   // (textEq=42_408) while actual upstream billed 148_891 tokens (ch/tok=
-  // 1.14). With the live override (1.14 ch/tok), the gate flips to ACCEPT.
+  // 1.14). With the override (1.14 ch/tok), the gate flips to ACCEPT.
 
   it('isCompressionProfitable: stale default rejects newline-heavy 170K slab', () => {
     // CLAUDE.md-like slab: many short lines, ~138K chars. Default ch/tok=4

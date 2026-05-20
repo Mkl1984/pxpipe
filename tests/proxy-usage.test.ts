@@ -380,16 +380,23 @@ describe('proxy usage extraction', () => {
     expect(captures[0]!.reqBodySha8).toBe(captures[1]!.reqBodySha8);
   });
 
-  // The proxy MUST NOT make any extra calls to upstream beyond the single
-  // /v1/messages forward. count_tokens was tried as a measurement path
-  // earlier, but it leaks the pre-compression text to Anthropic — which
-  // defeats the whole purpose of pixelpipe. This regression test asserts
-  // we never hit count_tokens (or any other endpoint) for any request.
-  it('does NOT call any side-channel endpoints (no count_tokens, no leaks)', async () => {
+  // The proxy makes ONE parallel side call: /v1/messages/count_tokens on
+  // the PRE-COMPRESSION body. That number lands on the dashboard as the
+  // baseline against which we measure savings. count_tokens is free
+  // (no billing) and is the only side path we whitelist — any other
+  // endpoint would be an unexpected leak.
+  it('calls /v1/messages/count_tokens (baseline probe) and no other side endpoints', async () => {
     const sidePaths: string[] = [];
     const restore = mockUpstream((req) => {
       const url = new URL(req.url);
       if (url.pathname !== '/v1/messages') sidePaths.push(url.pathname);
+      // count_tokens response shape: { input_tokens: number }
+      if (url.pathname === '/v1/messages/count_tokens') {
+        return new Response(JSON.stringify({ input_tokens: 123 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       return new Response(
         JSON.stringify({
           id: 'msg_x',
@@ -416,6 +423,100 @@ describe('proxy usage extraction', () => {
     await new Promise((r) => setTimeout(r, 20));
     restore();
 
-    expect(sidePaths).toEqual([]);
+    // count_tokens hit exactly once, no other side paths.
+    expect(sidePaths).toEqual(['/v1/messages/count_tokens']);
+  });
+
+  // baselineTokens from the count_tokens probe must land on info so the
+  // dashboard can roll it into the saved% denominator. This is the wiring
+  // that makes the headline number real instead of estimated.
+  it('attaches baselineTokens from count_tokens probe to info', async () => {
+    const restore = mockUpstream((req) => {
+      const url = new URL(req.url);
+      if (url.pathname === '/v1/messages/count_tokens') {
+        return new Response(JSON.stringify({ input_tokens: 4242 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          id: 'msg_x',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'ok' }],
+          model: 'claude-opus-4-5',
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    let captured: ProxyEvent | undefined;
+    const proxy = createProxy({
+      upstream: 'http://mock',
+      onRequest: (e) => { captured = e; },
+    });
+    const res = await proxy(
+      new Request('http://proxy/v1/messages', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: SAMPLE_REQ_BODY,
+      }),
+    );
+    await res.text();
+    await new Promise((r) => setTimeout(r, 20));
+    restore();
+
+    expect(captured).toBeDefined();
+    expect(captured!.info?.baselineTokens).toBe(4242);
+  });
+
+  // count_tokens is best-effort. If the probe 4xx's (e.g. upstream rejects
+  // a malformed model field, or the field-whitelist drops something the
+  // user added), the main /v1/messages forward must still succeed and the
+  // dashboard event just won't carry a baselineTokens. No exception thrown
+  // to the caller.
+  it('survives count_tokens failure without breaking /v1/messages', async () => {
+    const restore = mockUpstream((req) => {
+      const url = new URL(req.url);
+      if (url.pathname === '/v1/messages/count_tokens') {
+        return new Response(JSON.stringify({ error: 'bad model' }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          id: 'msg_x',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'ok' }],
+          model: 'claude-opus-4-5',
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    let captured: ProxyEvent | undefined;
+    const proxy = createProxy({
+      upstream: 'http://mock',
+      onRequest: (e) => { captured = e; },
+    });
+    const res = await proxy(
+      new Request('http://proxy/v1/messages', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: SAMPLE_REQ_BODY,
+      }),
+    );
+    expect(res.status).toBe(200);
+    await res.text();
+    await new Promise((r) => setTimeout(r, 20));
+    restore();
+
+    expect(captured).toBeDefined();
+    expect(captured!.info?.baselineTokens).toBeUndefined();
   });
 });

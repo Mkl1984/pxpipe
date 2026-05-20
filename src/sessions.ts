@@ -157,18 +157,26 @@ export async function aggregateSessions(
     // Cling to whichever cwd we saw first; sessions that hop directories are
     // rare and the first cwd is the most stable identifier.
     if (s.project === undefined && ev.cwd) s.project = ev.cwd;
+    // Real per-session savings: only count events that carry both a
+    // count_tokens baseline AND an upstream usage block. Same input-only
+    // weighting as the headline cards (input + cc·1.25 + cr·0.10).
+    // Events missing either side contribute to requestCount but not the
+    // savings rollup — no estimation, no synthetic 4-char/tok shortcut.
+    const inp = ev.input_tokens ?? 0;
+    const cc = ev.cache_create_tokens ?? 0;
+    const cr = ev.cache_read_tokens ?? 0;
+    const haveUsage = inp > 0 || cc > 0 || cr > 0;
+    const baseline = ev.baseline_tokens;
     if (
-      ev.compressed &&
-      typeof ev.compressed_chars === 'number' &&
-      typeof ev.image_count === 'number'
+      typeof baseline === 'number' &&
+      baseline > 0 &&
+      haveUsage
     ) {
-      // Honest savings math (mirrors src/dashboard.ts:baselineCost).
-      // compressed_chars is the actual text we IMAGE-encoded; orig_chars
-      // would include text-only blocks that didn't contribute to image_count.
-      const textTokens = ev.compressed_chars / 4;
-      const imageTokens = ev.image_count * 2500;
-      const tokensSaved = textTokens - imageTokens;
+      const actualInputEff = inp + cc * 1.25 + cr * 0.1;
+      const tokensSaved = baseline - actualInputEff;
       s.tokensSavedEst += Math.round(tokensSaved);
+      // charsSaved remains a coarse byte-equivalent; useful as a rough
+      // "we shaved X kB off the wire" callout but not load-bearing math.
       s.charsSaved += Math.round(tokensSaved * 4);
     }
     if (typeof ev.cache_read_tokens === 'number') {

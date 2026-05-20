@@ -261,6 +261,61 @@ function filterHeaders(src: Headers, strip: Set<string>): Headers {
   return out;
 }
 
+/** /v1/messages/count_tokens accepts a strict subset of /v1/messages params.
+ *  Anything else (`stream`, `max_tokens`, `temperature`, `top_p`, `top_k`,
+ *  `stop_sequences`, `metadata`, `service_tier`) makes it 400 with
+ *  "Unknown parameter". Strip the verbatim body to the accepted fields.
+ *  Returns null if the body can't be parsed or is missing required fields
+ *  (probe is skipped, baseline_tokens stays absent on the event). */
+const COUNT_TOKENS_FIELDS = new Set([
+  'model',
+  'messages',
+  'system',
+  'tools',
+  'tool_choice',
+  'thinking',
+  'mcp_servers',
+]);
+
+function buildCountTokensBody(bytes: Uint8Array): Uint8Array | null {
+  try {
+    const obj = JSON.parse(new TextDecoder().decode(bytes)) as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(obj)) {
+      if (COUNT_TOKENS_FIELDS.has(k)) out[k] = obj[k];
+    }
+    if (typeof out.model !== 'string' || !Array.isArray(out.messages)) return null;
+    return new TextEncoder().encode(JSON.stringify(out));
+  } catch {
+    return null;
+  }
+}
+
+/** POST /v1/messages/count_tokens with the given body. Returns the upstream's
+ *  `input_tokens` number or null on any failure. count_tokens is documented
+ *  as a free endpoint (no input-token billing) — we use it once per request
+ *  on the PRE-COMPRESSION body to get the ground-truth baseline. Actual
+ *  post-compression tokens already come back free in the /v1/messages usage
+ *  block (input_tokens + cache_create + cache_read), so no second probe. */
+async function countTokensUpstream(
+  upstream: string,
+  body: Uint8Array,
+  headers: Headers,
+): Promise<number | null> {
+  try {
+    const res = await fetch(upstream + '/v1/messages/count_tokens', {
+      method: 'POST',
+      headers,
+      body: body as unknown as BodyInit,
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { input_tokens?: unknown };
+    return typeof json.input_tokens === 'number' ? json.input_tokens : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Build the proxy fetch handler bound to a config. */
 export function createProxy(config: ProxyConfig = {}) {
   const upstream = (config.upstream ?? DEFAULT_UPSTREAM).replace(/\/+$/, '');
@@ -299,6 +354,18 @@ export function createProxy(config: ProxyConfig = {}) {
             // gzip failure is non-fatal — drop the body sample, keep the rest.
           }
         }
+        // Wait for the baseline count_tokens probe before persisting the
+        // event so baseline_tokens lands on the same row as the usage block.
+        // null result (probe failed) leaves the field absent — dashboard
+        // skips that event from the savings math.
+        if (baselinePromise && info) {
+          try {
+            const b = await baselinePromise;
+            if (b !== null) info.baselineTokens = b;
+          } catch {
+            /* probe threw — drop, keep the rest of the event intact */
+          }
+        }
         await config.onRequest?.({
           method: req.method,
           path: url.pathname,
@@ -322,12 +389,15 @@ export function createProxy(config: ProxyConfig = {}) {
     let bodyOut: BodyInit | null = null;
     let info: TransformInfo | undefined;
 
+    // Ground-truth baseline measurement. Fires /v1/messages/count_tokens on
+    // the PRE-COMPRESSION body in parallel with the main forward. Resolves
+    // to a number (baseline tokens) or null (probe failed, e.g. count_tokens
+    // 4xx'd). Lands on info.baselineTokens before the host event persists.
+    let baselinePromise: Promise<number | null> | undefined;
+
     if (isMessages) {
       const bodyIn = new Uint8Array(await req.arrayBuffer());
       try {
-        // Resolve transform options per-request when the host passed a
-        // function — lets dashboardState.fitCosts()'s live α flow into
-        // isCompressionProfitable on every call.
         const transformOpts =
           typeof config.transform === 'function' ? config.transform() : config.transform;
         const r = await transformRequest(bodyIn, transformOpts);
@@ -335,14 +405,23 @@ export function createProxy(config: ProxyConfig = {}) {
         // it's a valid body and we never use SharedArrayBuffer.
         bodyOut = r.body as unknown as BodyInit;
         info = r.info;
-        // Stash the raw bytes and eagerly hash them. Hash lands on every event
-        // (cheap, ~ a SHA-256 over a few hundred KB). The bytes themselves are
-        // only gzipped+emitted on 4xx — see `fire`.
         reqBodyBytes = r.body;
         if (r.body.byteLength > 0) {
           reqBodySha8 = await sha8Bytes(r.body);
         }
 
+        // Kick off the count_tokens probe on the ORIGINAL body BEFORE the
+        // main forward so the two calls overlap. Anthropic doesn't bill
+        // count_tokens, and the result is the only honest baseline we can
+        // get — the post-compression token count comes back free in the
+        // /v1/messages response usage block.
+        const ctBody = buildCountTokensBody(bodyIn);
+        if (ctBody) {
+          const ctHeaders = filterHeaders(req.headers, STRIP_REQ_HEADERS);
+          ctHeaders.set('content-type', 'application/json');
+          if (config.apiKey) ctHeaders.set('x-api-key', config.apiKey);
+          baselinePromise = countTokensUpstream(upstream, ctBody, ctHeaders);
+        }
       } catch (e) {
         fire(502, undefined, `transform_error: ${(e as Error).message}`);
         return new Response(JSON.stringify({ error: 'pixelpipe transform failed' }), {

@@ -449,15 +449,10 @@ async function main(): Promise<void> {
     //      is off, force compress=false so /v1/messages forwards
     //      untransformed. Lets the operator instantly disable the proxy
     //      when upstream is unhealthy without restarting.
-    //   2. Otherwise inject the dashboard's live empirical chars/token
-    //      into the break-even gate when the regression has converged.
-    //      All other options come from DEFAULTS in transform.ts.
+    //   2. Otherwise use DEFAULTS in transform.ts for break-even gating.
     transform: () => {
       if (!dashboard.getCompressionEnabled()) return { compress: false };
-      const fit = dashboard.fitCosts();
-      return fit && fit.chars_per_token > 0
-        ? { charsPerToken: fit.chars_per_token }
-        : {};
+      return {};
     },
     onRequest: async (e) => {
       // Feed the dashboard BEFORE tracker.emit — toTrackEvent strips

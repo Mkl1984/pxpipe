@@ -135,57 +135,76 @@ describe('aggregateSessions', () => {
     expect(sessions.get('aaaaaaaa')?.requestCount).toBe(2);
   });
 
-  it('accumulates tokens saved using honest formula (allows negative)', async () => {
+  it('accumulates tokens saved from baseline_tokens vs upstream usage (allows negative)', async () => {
     writeEvents(tmp, [
-      // 100,000 chars compressed to 2 images.
-      //   textTokens  = 100000/4 = 25000
-      //   imageTokens = 2 × 2500 = 5000
-      //   tokensSaved = +20000  → win
+      // baseline 20000, actual_input_eff = 1000 + 800*1.25 + 100*0.10 = 2010
+      //   saved = 20000 − 2010 = 17990
       ev({
         first_user_sha8: 'aaaaaaaa',
         compressed: true,
-        orig_chars: 100_000,
-        compressed_chars: 100_000,
-        image_count: 2,
+        baseline_tokens: 20_000,
+        input_tokens: 1_000,
+        cache_create_tokens: 800,
+        cache_read_tokens: 100,
       }),
-      // 5,000 chars compressed to 1 image — NET LOSS.
-      //   textTokens  = 5000/4 = 1250
-      //   imageTokens = 1 × 2500 = 2500
-      //   tokensSaved = -1250  → loss; must NOT be clamped
+      // baseline 2000, actual_input_eff = 3000 + 0 + 0 = 3000 → NET LOSS −1000
+      // (must NOT be clamped to zero)
       ev({
         first_user_sha8: 'aaaaaaaa',
         compressed: true,
-        orig_chars: 5_000,
-        compressed_chars: 5_000,
-        image_count: 1,
+        baseline_tokens: 2_000,
+        input_tokens: 3_000,
+        cache_create_tokens: 0,
+        cache_read_tokens: 0,
       }),
-      // Not compressed at all — skipped.
+      // Missing baseline — skipped from savings rollup, still counts toward requests.
       ev({
         first_user_sha8: 'aaaaaaaa',
         compressed: false,
-        orig_chars: 1000,
-        image_count: 0,
+        input_tokens: 500,
+      }),
+      // Has baseline but no usage block — also skipped (apples-to-apples).
+      ev({
+        first_user_sha8: 'aaaaaaaa',
+        compressed: true,
+        baseline_tokens: 9_999,
       }),
     ]);
     const { sessions } = await aggregateSessions(tmp);
     const s = sessions.get('aaaaaaaa')!;
-    // 20000 + (-1250) = 18750 tokens net.
-    expect(s.tokensSavedEst).toBe(18_750);
-    expect(s.charsSaved).toBe(18_750 * 4);
+    // 17990 + (−1000) = 16990
+    expect(s.tokensSavedEst).toBe(16_990);
+    expect(s.charsSaved).toBe(16_990 * 4);
+    expect(s.requestCount).toBe(4);
   });
 
-  it('reports negative tokensSavedEst when all compressions net-lose', async () => {
+  it('reports negative tokensSavedEst when all events net-lose', async () => {
     writeEvents(tmp, [
-      // 3 small blocks each net-lose ~1250 tokens.
-      ev({ first_user_sha8: 'bbbbbbbb', compressed: true, orig_chars: 5000, compressed_chars: 5000, image_count: 1 }),
-      ev({ first_user_sha8: 'bbbbbbbb', compressed: true, orig_chars: 5000, compressed_chars: 5000, image_count: 1 }),
-      ev({ first_user_sha8: 'bbbbbbbb', compressed: true, orig_chars: 5000, compressed_chars: 5000, image_count: 1 }),
+      // Each event: baseline=1000, actual=2000 → −1000
+      ev({
+        first_user_sha8: 'bbbbbbbb',
+        compressed: true,
+        baseline_tokens: 1_000,
+        input_tokens: 2_000,
+      }),
+      ev({
+        first_user_sha8: 'bbbbbbbb',
+        compressed: true,
+        baseline_tokens: 1_000,
+        input_tokens: 2_000,
+      }),
+      ev({
+        first_user_sha8: 'bbbbbbbb',
+        compressed: true,
+        baseline_tokens: 1_000,
+        input_tokens: 2_000,
+      }),
     ]);
     const { sessions } = await aggregateSessions(tmp);
     const s = sessions.get('bbbbbbbb')!;
-    // 3 × (1250 - 2500) = -3750 tokens.
-    expect(s.tokensSavedEst).toBe(-3750);
-    expect(s.charsSaved).toBe(-15_000);
+    // 3 × −1000 = −3000
+    expect(s.tokensSavedEst).toBe(-3_000);
+    expect(s.charsSaved).toBe(-12_000);
   });
 });
 

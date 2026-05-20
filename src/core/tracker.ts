@@ -106,6 +106,14 @@ export interface TrackEvent {
   cache_create_tokens?: number;
   cache_read_tokens?: number;
 
+  /** Ground-truth pre-compression token count from a parallel call to
+   *  /v1/messages/count_tokens on the ORIGINAL request body. The endpoint
+   *  is free (no billing). Absent when the probe failed; those events are
+   *  excluded from the dashboard's savings rollup. The post-compression
+   *  total comes from the usage block above (input + cache_create +
+   *  cache_read), so no second probe is needed. */
+  baseline_tokens?: number;
+
   // Errors:
   error?: string;
   /** First ~2 KiB of the upstream response body for 4xx requests. Lets us
@@ -224,6 +232,9 @@ export function toTrackEvent(ev: ProxyEvent): TrackEvent {
     if (info.systemSha8) out.system_sha8 = info.systemSha8;
     if (info.claudeMdSha8) out.claude_md_sha8 = info.claudeMdSha8;
     if (info.firstUserSha8) out.first_user_sha8 = info.firstUserSha8;
+    if (info.baselineTokens !== undefined && info.baselineTokens > 0) {
+      out.baseline_tokens = info.baselineTokens;
+    }
   }
   if (env) {
     if (env.cwd) out.cwd = env.cwd;

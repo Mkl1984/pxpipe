@@ -85,17 +85,8 @@ export interface TransformOptions {
    *  Auto-clamped if the resulting canvas would exceed 1568 px wide. */
   multiCol?: number;
   /** Chars-per-token assumption used by `isCompressionProfitable()`. Default
-   *  4 (Anthropic's published English-text average ≈ α=0.25). The host can
-   *  inject the live empirical `chars_per_token` from `dashboardState.
-   *  fitCosts()` per-request — content with dense tokenization (JSON-heavy,
-   *  tool definitions, Claude Code's CLAUDE.md slabs at α≈0.5-0.9) makes
-   *  the stale 4 chars/tok wildly under-estimate text-token equivalence,
-   *  and the gate then rejects compressions that would actually save real
-   *  tokens. With the live value plumbed in, the gate auto-tightens or
-   *  loosens to match the model's actual tokenization rate.
-   *  Production trace 2026-05-19: 200+ events with slabs 113K-170K chars
-   *  hit `not_profitable` because the gate used 4 chars/tok while live α
-   *  was ≈0.88 (1.14 chars/tok) — gate was off by ~3.5× on the text side. */
+   *  4 (Anthropic's published English-text average). Host may override per
+   *  request if it has a better number for the specific deployment. */
   charsPerToken?: number;
 }
 
@@ -128,9 +119,8 @@ const DEFAULTS: Required<TransformOptions> = {
   // (~1× per-call) against HIGH cache-topology risk. Live measurement on
   // 2026-05-19 confirmed the warning: with 128-turn history, replacing
   // ~21k chars of text with ~140k tokens of imagery LOSES money on every
-  // request. The math in `baselineCost` correctly reports negative savings
-  // when imgTokensEst > txtReplaced. Re-enable per-deployment only after
-  // measuring a positive delta on your specific traffic shape.
+  // request (img cost exceeds text replaced). Re-enable per-deployment
+  // only after measuring a positive delta on your specific traffic shape.
   compressHistory: false,
   historyKeepTail: 4,
   historyMinPrefix: 10,
@@ -225,10 +215,8 @@ export function isCompressionProfitable(
   imageCountCap?: number,
   numCols: number = 1,
   /** Chars-per-token assumption for the text side of the break-even math.
-   *  Default 4 (Anthropic's English-text average). Host can pass the live
-   *  empirical `chars_per_token` from dashboardState.fitCosts() so the gate
-   *  auto-tunes to the model's actual tokenization rate. Lower values =
-   *  more profitable text compressions (each char buys more tokens back). */
+   *  Default 4 (Anthropic's English-text average). Lower values = more
+   *  profitable text compressions (each char buys more tokens back). */
   charsPerToken: number = CHARS_PER_TOKEN,
 ): boolean {
   const n = Math.max(1, numCols | 0);
@@ -394,6 +382,14 @@ export interface TransformInfo {
     | 'not_profitable'
     | 'render_empty'
     | 'collapsed';
+  /** Ground-truth baseline token count for THIS request, from a parallel
+   *  call to /v1/messages/count_tokens on the PRE-COMPRESSION body. The
+   *  endpoint is free (no input-token billing). When present, the dashboard
+   *  computes the real saved_pct directly: actual = input + cache_create +
+   *  cache_read (from /v1/messages usage), saved = baseline - actual.
+   *  Absent when the probe failed (network, 4xx) — that event is then
+   *  excluded from the savings rollup. */
+  baselineTokens?: number;
 }
 
 // --- helpers ---------------------------------------------------------------
