@@ -660,7 +660,7 @@ const DASHBOARD_HTML = `<!doctype html>
          font: 14px/1.45 -apple-system,BlinkMacSystemFont,"SF Mono",Menlo,monospace; }
   h1 { font-size: 18px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.01em; }
   .sub { color: #6e7681; font-size: 12px; margin-bottom: 22px; }
-  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 22px; }
+  .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 22px; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px;
           padding: 14px 16px; }
   .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
@@ -708,6 +708,7 @@ const DASHBOARD_HTML = `<!doctype html>
   .preview-crop img { display: block; image-rendering: pixelated;
                       width: auto; height: auto; max-width: none; }
   .row { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; }
+  @media (max-width: 1200px) { .grid { grid-template-columns: repeat(3, 1fr); } }
   @media (max-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } .row { grid-template-columns: 1fr; } }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
          background: #3fb950; margin-right: 6px; vertical-align: middle;
@@ -765,6 +766,13 @@ const DASHBOARD_HTML = `<!doctype html>
     <div class="small" id="m_pct_sub">total bill (input + output×5) · input-only: <span id="m_pct_total">0%</span></div>
     <details class="math"><summary>show calculation</summary>
       <div class="formula" id="m_pct_math"></div>
+    </details>
+  </div>
+  <div class="card"><div class="label">token-equivalent total</div>
+    <div class="value" id="m_tokeq">0</div>
+    <div class="small" id="m_tokeq_sub">weekly-meter consumption · input + output×5</div>
+    <details class="math"><summary>show calculation</summary>
+      <div class="formula" id="m_tokeq_math"></div>
     </details>
   </div>
 </div>
@@ -896,6 +904,15 @@ async function tick() {
     document.getElementById('m_pct').textContent = \`\${(s.saved_pct_of_total_bill || 0).toFixed(1)}%\`;
     document.getElementById('m_pct_total').textContent =
       \`\${(s.saved_pct_input_only || 0).toFixed(1)}%\`;
+    // Token-equivalent card: the absolute number Anthropic's weekly meter sees.
+    // This is input + output×5 (in input-token-equivalents). Lets the operator
+    // see a heavy-output day as a real spike instead of hiding behind a flat
+    // "73% saved" gauge. Pairs with the baseline number in the sub-line so the
+    // ratio is visible too — that ratio is what saved_pct_of_total_bill above
+    // reports as a percentage.
+    document.getElementById('m_tokeq').textContent = numFmt(s.actual_token_equivalent);
+    document.getElementById('m_tokeq_sub').textContent =
+      \`baseline \${numFmt(s.baseline_token_equivalent)} · input + output×5\`;
 
     // Populate "show calculation" blocks under each savings card.
     renderSavingsMath(s);
@@ -1008,6 +1025,31 @@ function renderSavingsMath(s) {
     + fmtRow('saved', s.saved_input_tokens, '<span class="op">=</span> baseline − actual')
     + fmtRow('saved_pct', (s.saved_pct || 0).toFixed(1) + '%',
              '<span class="op">=</span> saved / baseline × 100')
+    + '<span class="src">measured · no estimation</span>';
+
+  // ---- token-equivalent total card ----------------------------------------
+  // What Anthropic's weekly limit actually meters. Output counts at the same
+  // ratio as the per-Mtok price card (5×) so the number tracks the published
+  // weekly-limit caveat in the README. This is the "XX used" number, not a
+  // savings number — it's the absolute cost surface that compression can't
+  // touch, so a heavy-output day shows up as a real spike instead of hiding
+  // behind a flat 73% gauge.
+  document.getElementById('m_tokeq_math').innerHTML =
+    '<div><span class="k">formula:</span> <span class="v">'
+      + 'token_equivalent = input + output × ' + (pa.output_multiplier ?? 5) + '</span></div>'
+    + '<div><span class="k">why ×' + (pa.output_multiplier ?? 5) + ':</span> <span class="v">'
+      + 'matches Anthropic\\'s per-Mtok price ratio ($'
+      + (pa.input_per_mtok ?? 5) + ' input vs $'
+      + ((pa.input_per_mtok ?? 5) * (pa.output_multiplier ?? 5))
+      + ' output)</span></div>'
+    + '<div style="height:6px"></div>'
+    + fmtRow('actual_input', s.actual_input_weighted, '(weighted upstream usage)')
+    + fmtRow('output', s.output_weighted,
+             '<span class="op">=</span> raw output_tokens (already weighted)')
+    + fmtRow('actual_token_equivalent', s.actual_token_equivalent,
+             '<span class="op">=</span> actual_input + output')
+    + fmtRow('baseline_token_equivalent', s.baseline_token_equivalent,
+             '(unproxied counterfactual, same ×' + (pa.output_multiplier ?? 5) + ' on output)')
     + '<span class="src">measured · no estimation</span>';
 }
 
