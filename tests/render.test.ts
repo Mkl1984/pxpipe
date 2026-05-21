@@ -1831,12 +1831,16 @@ describe('transform', () => {
   });
 
   it('TransformOptions.charsPerToken: low value unlocks a previously-rejected slab end-to-end', async () => {
-    // Dense 6060-char slab — rejected at default cpt=4, accepted at cpt=1.14.
-    // Forced to numCols=1 (single-col) so the cpt override does the flipping
-    // on its own; multi-col adds a separate 10% safety margin (see the
-    // numCols=2 regression test above).
+    // Dense 4848-char slab — rejected at default SLAB_CHARS_PER_TOKEN=2.0
+    // (text=2424 tok < single-col image cost 2500), accepted at cpt=1.14
+    // (text=4252 tok > 2500). Forced to numCols=1 so the cpt override does
+    // the flipping on its own; multi-col adds a separate 10% safety margin
+    // (see the numCols=2 regression test above). Resized 2026-05-21 when
+    // SLAB_CHARS_PER_TOKEN moved 2.5 → 2.0; the 6060-char fixture now
+    // compresses under the new default and stopped exercising the intended
+    // before/after edge.
     const line = 'A'.repeat(100) + '\n';
-    const slab = line.repeat(60); // 6060 chars
+    const slab = line.repeat(48); // 4848 chars
     const req = JSON.stringify({
       model: 'claude-3-5-sonnet',
       messages: [{ role: 'user', content: 'hi' }],

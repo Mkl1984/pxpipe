@@ -178,60 +178,56 @@ const DEFAULTS: Required<TransformOptions> = {
  *  mix; tool_result content is typically code-shaped. */
 const CHARS_PER_TOKEN = 4;
 
-/** Empirical chars-per-token for the *system slab + tool docs* path.
+/** Empirical chars-per-token for the *image-slab* path.
  *
- *  Source: N=354 production cold-miss `count_tokens` baselines on
- *  Claude Code (pixelpipe events.jsonl, 2026-05-18 → 2026-05-20):
- *    body cpt distribution — median 1.17, p95 2.5, MAX 2.62.
+ *  Updated 2026-05-21 from 2.5 → 2.0 on the basis of N=391 production
+ *  rows on Opus 4.7 (last 7 days, baseline_probe_status='ok'):
  *
- *  System slabs are JSON-dense (tool definitions, schemas, structured
- *  prompts) so they sit at cpt ~1.2, NOT the English-prose 4. Using cpt=4
- *  for this call site told the gate text was 3.4× cheaper than reality,
- *  silently rejecting every profitable slab compression we've seen since
- *  the row-aware gate landed.
+ *      avg_outgoing_text_chars = 231,925
+ *      avg_real_input_tokens   = 115,893    (input + cache_created + cache_read)
+ *      => observed cpt         = 1.91
  *
- *  Safety: 2.5 is the **upper bound** of observed real cpts (max=2.62
- *  with one sample, p95=2.5). Picking the upper bound keeps the prime-
- *  directive guarantee intact — the text-token estimate is a LOWER bound
- *  on real text cost, so any `imageCost < textTokens` decision is also
- *  `imageCost < realTextCost`. If a slab in the wild ever lands above
- *  cpt=2.5, the gate would still under-bill text by < 5% and the worst
- *  case is a marginal-loss compression, not a runaway.
+ *  Opus 4.7 ships a new tokenizer; the older 2.5 value was calibrated on
+ *  Opus 4.5/4.6 text and now systematically OVER-estimates chars-per-token
+ *  by ~30%, which UNDER-estimates the real text-token cost the gate is
+ *  comparing image cost against. The result: the gate rejects compressions
+ *  that would actually be net wins. 2.0 brings the gate's text-token
+ *  estimate close to reality while still rounding slightly conservative
+ *  versus the observed mean (1.91), so a marginal-shape outlier slab can
+ *  still fail the gate without becoming a runaway loss.
  *
  *  Why this is slab-specific and NOT a global default: reminders and
  *  tool_result content have unknown shape (could be raw English prose
  *  with cpt~4). Leaving those at CHARS_PER_TOKEN=4 preserves the
  *  conservative bias where shape isn't known a priori. */
-export const SLAB_CHARS_PER_TOKEN = 2.5;
+export const SLAB_CHARS_PER_TOKEN = 2.0;
 
 /** Empirical chars-per-token for the *history compression* path.
  *
- *  Source: same N=354 production telemetry as SLAB_CHARS_PER_TOKEN, plus
- *  a tighter sub-sample of N=10 events where the history collapse was
- *  rejected as `not_profitable` (history_reason="not_profitable" in
- *  events.jsonl, 2026-05-18 → 2026-05-20):
- *    body cpt on rejected history events — min 1.08, median 1.09, MAX 1.10.
+ *  Updated 2026-05-21 from 2.5 → 2.0 on the same Opus 4.7 telemetry as
+ *  SLAB_CHARS_PER_TOKEN (N=391, observed cpt=1.91). History content is
+ *  even denser than the slab path on average (tool_use JSON dominates
+ *  Claude Code sessions, body cpt observed ~1.09 on rejected events),
+ *  so the 2.5 → 2.0 move here is doubly conservative.
  *
- *  History content shape: collapsed-prefix turns from the conversation =
- *  past tool_use args (JSON, very dense), tool_result blocks (variable),
- *  assistant/user text (prose, less dense). In tool-heavy Claude Code
- *  sessions the JSON dominates and the observed body-cpt sits at ~1.09 —
- *  even denser than the slab path's 1.17 median.
+ *  Diagnostic that drove this change: 283/391 = 72% of measured Opus 4.7
+ *  pixelpipe rows in the last 7 days carried
+ *  pixelpipe_history_reason='not_profitable'. The break-even gate was
+ *  rejecting most history-collapse opportunities because it was
+ *  comparing real image costs against a 30%-under-counted text cost.
  *
- *  Why 2.5 (not lower despite tighter empirical data): a chat-heavy
- *  session with predominantly user/assistant prose could push history
- *  content closer to the English-prose cpt~4 range. We have no telemetry
- *  for those sessions yet (chat-only Claude Code is rare). 2.5 = slab's
- *  empirically-justified upper bound, applied here to keep both call
- *  sites symmetric and to absorb chat-shape uncertainty. If a real
- *  chat-only session ever drives observed cpt above 2.5 we'll see it
- *  in the dashboard before any net-loss compression lands.
+ *  Prediction grading (one session out): 'not_profitable' rows should
+ *  drop below 40% of ok-status measured Opus 4.7 rows; the 'collapsed'
+ *  count should rise. If 'not_profitable' stays >55%, the gate is being
+ *  rejected for a non-cpt reason (horizon, prefix shape) and constants
+ *  alone won't fix it.
  *
- *  Safety: at cpt=2.5 the gate's text-token estimate (textLen / 2.5) is
- *  a LOWER bound on real text cost whenever real cpt ≤ 2.5 (= every
- *  history sample we've ever observed). Image-cost-vs-estimated-text
- *  passing therefore implies image-cost-vs-real-text passing. */
-export const HISTORY_CHARS_PER_TOKEN = 2.5;
+ *  Safety: at cpt=2.0 the gate's text-token estimate (textLen / 2.0) is
+ *  a LOWER bound on real text cost whenever real cpt ≤ 2.0. The current
+ *  observed cpt is 1.91, comfortably under. Chat-only sessions could in
+ *  theory drive cpt above 2.0 — if that ever lands in production, we'll
+ *  see it in the dashboard before any net-loss compression. */
+export const HISTORY_CHARS_PER_TOKEN = 2.0;
 
 /** Empirical per-image cost at numCols=1. Source: dashboard.ts measurement
  *  trace. Kept here as a constant rather than imported from dashboard.ts
@@ -1975,7 +1971,7 @@ export async function transformRequest(
     // count after wrapping.
     // History cpt is empirically ~1.09 (N=10 rejected-events sample) — JSON-
     // dense like the slab, so use the same conservative upper-bound cpt
-    // baked into HISTORY_CHARS_PER_TOKEN=2.5. Host override (opts.charsPerToken)
+    // baked into HISTORY_CHARS_PER_TOKEN=2.0. Host override (opts.charsPerToken)
     // wins if the dashboard ever feeds back a live empirical fit.
     // Same discriminator as the slab path: check the *raw* `opts` so a host
     // that genuinely wants `4` can pin to it without colliding with the merged
