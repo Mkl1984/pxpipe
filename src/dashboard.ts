@@ -480,30 +480,6 @@ export class DashboardState {
     const haveUsage = u !== undefined && (inp > 0 || out > 0 || cc > 0 || cr > 0);
     const baseline = info?.baselineTokens;
 
-    // Record the request's transform breakdown for the Context Map panel. Only
-    // once real usage is in — otherwise realInput=0 and the panel shows a bogus
-    // "-100%" for an in-flight request. The completed event carries both the
-    // request info (baseline, images, buckets) and the response usage.
-    if (info && haveUsage && imgId !== undefined) {
-      // Key by the request's first image id so the recent table's "view" link
-      // (which carries that id) maps straight to this breakdown.
-      this.contextHistory.push({
-        id: imgId,
-        baselineTokens: baseline ?? 0,
-        realInput: inp + cc + cr,
-        output: out,
-        imageCount: info.imageCount ?? 0,
-        buckets: { ...(info.bucketChars ?? {}) },
-        imageIds: [...imgIds],
-        compressed,
-      });
-      // Keep in lockstep with RECENT_CAP so every "view" link in the recent
-      // table resolves to a real breakdown (was 30 < 50, so older visible rows
-      // silently fell back to the latest request's data).
-      if (this.contextHistory.length > RECENT_CAP) {
-        this.contextHistory.splice(0, this.contextHistory.length - RECENT_CAP);
-      }
-    }
     // Honest gating: only attribute savings when BOTH baseline probes
     // resolved (status === 'ok'). When the cacheable-prefix probe failed
     // (status === 'partial') we previously fell through to cacheable=0,
@@ -541,6 +517,36 @@ export class DashboardState {
     // headline relative to what Anthropic's weekly limit meters as token
     // consumption (input + output × 5).
     const outputEquiv = haveUsage ? out * OUTPUT_TOKEN_RATE : 0;
+
+    // Record the request's transform breakdown for the Context Map panel. This
+    // runs AFTER the eff-tokens are computed so the Details headline reads the
+    // SAME cache-weighted pair as the recent row's As-text / Sent / Saved
+    // columns (baselineInputEff / actualInputEff) — the two panels can no longer
+    // disagree. Raw counts are kept for the cache-blind sub-line. Gate on
+    // haveUsage so an in-flight request doesn't render a bogus "-100%".
+    if (info && haveUsage && imgId !== undefined) {
+      // Key by the request's first image id so the recent table's "view" link
+      // (which carries that id) maps straight to this breakdown.
+      this.contextHistory.push({
+        id: imgId,
+        baselineTokens: baseline ?? 0,
+        realInput: inp + cc + cr,
+        baselineInputEff,
+        actualInputEff,
+        haveBaseline,
+        output: out,
+        imageCount: info.imageCount ?? 0,
+        buckets: { ...(info.bucketChars ?? {}) },
+        imageIds: [...imgIds],
+        compressed,
+      });
+      // Keep in lockstep with RECENT_CAP so every "view" link in the recent
+      // table resolves to a real breakdown (was 30 < 50, so older visible rows
+      // silently fell back to the latest request's data).
+      if (this.contextHistory.length > RECENT_CAP) {
+        this.contextHistory.splice(0, this.contextHistory.length - RECENT_CAP);
+      }
+    }
 
     this.totals.requests += 1;
     if (compressed) this.totals.compressedRequests += 1;

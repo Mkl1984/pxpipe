@@ -317,8 +317,11 @@ export function renderHeaderFragment(s: StatsPayload, port: number): string {
 
 export interface ContextMapData {
   id: number; // first image id (matches recent-table link)
-  baselineTokens: number; // count_tokens as plain text
-  realInput: number; // input + cache_create + cache_read
+  baselineTokens: number; // RAW count_tokens as plain text (cache-blind; sub-line only)
+  realInput: number; // RAW input + cache_create + cache_read (cache-blind)
+  baselineInputEff: number; // cache-WEIGHTED baseline — what text would actually be billed
+  actualInputEff: number; // cache-WEIGHTED actual — what the images were actually billed
+  haveBaseline: boolean; // weighted pair is trustworthy (baseline probe resolved)
   output: number;
   imageCount: number;
   buckets: Partial<Record<string, number>>; // bucket → chars rendered to PNG
@@ -348,9 +351,16 @@ export function renderContextMapFragment(
   if (!c || (c.baselineTokens <= 0 && c.imageCount <= 0)) {
     return `<div class="ctxmap"><div class="empty-note">Pick <strong>Details</strong> on a request to see exactly which parts became images and which stayed as text.</div></div>`;
   }
-  const base = c.baselineTokens;
-  const real = c.realInput;
-  const pct = base > 0 ? Math.round((1 - real / base) * 100) : 0;
+  // Cache-aware basis — identical to the recent row's As-text / Sent / Saved
+  // columns, so the two panels can never contradict each other. The raw
+  // count_tokens ratio is cache-blind: it over-states savings whenever the
+  // prefix would have been a cheap cache-read, so it must NOT drive the
+  // headline. It survives only as a clarifying sub-line below.
+  const showCompare = c.haveBaseline && c.baselineInputEff > 0;
+  const base = c.baselineInputEff;
+  const real = c.actualInputEff;
+  const pct = showCompare ? Math.round((1 - real / base) * 100) : 0;
+  const rawShrink = c.baselineTokens > 0 ? Math.round((1 - c.realInput / c.baselineTokens) * 100) : 0;
   const totalImagedChars = CTXMAP_BUCKETS.reduce((a, [key]) => a + (c.buckets[key] ?? 0), 0);
 
   const imgRows = CTXMAP_BUCKETS.map(([key, label]) => [label, c.buckets[key] ?? 0] as const)
@@ -374,15 +384,25 @@ export function renderContextMapFragment(
       `</div>`
     : '';
 
-  const headline =
-    base > 0
-      ? `<span class="ctx-big">${pct}%</span> smaller — <strong>${kFmt(base)}</strong> tokens as plain text became <strong>${kFmt(real)}</strong> tokens actually sent`
-      : `<strong>${kFmt(real)}</strong> tokens sent`;
+  const headline = !showCompare
+    ? `<strong>${kFmt(c.actualInputEff || c.realInput)}</strong> billed tokens sent`
+    : pct >= 0
+      ? `<span class="ctx-big">${pct}%</span> smaller — <strong>${kFmt(base)}</strong> billed tokens as cached text became <strong>${kFmt(real)}</strong> billed tokens as images`
+      : `<span class="ctx-big">${-pct}%</span> bigger — imaging cost <strong>${kFmt(real)}</strong> billed tokens vs <strong>${kFmt(base)}</strong> if kept as cached text`;
+  // Clarifying sub-line: tells the user the headline counts cache discounts, and
+  // explains the confusing case where the picture is physically smaller yet costs
+  // more — because the text it replaced would have been a near-free cache-read.
+  const subnote = !showCompare
+    ? 'Billed tokens count cache discounts (reads at 0.1×) — no trustworthy text baseline for this request yet.'
+    : pct < 0 && rawShrink > 0
+      ? `Billed = after cache discounts (reads at 0.1×), same basis as the Saved column. The raw text is ${rawShrink}% smaller, but most of it would have been a cheap cache-read — so imaging it cost more.`
+      : `Billed = after cache discounts (reads at 0.1×), same basis as the Saved column. Raw content shrank ${rawShrink}%.`;
   const title = isLatest ? 'Latest request' : 'Selected request';
 
   return (
     `<div class="ctxmap">` +
     `<div class="ctx-headline"><span class="ctx-title">${title}</span> ${headline}</div>` +
+    `<div class="split-note ctx-subnote">${subnote}</div>` +
     `<div class="legend"><span class="tag tag-img">Became an image</span><span class="tag tag-txt">Stayed as text</span></div>` +
     `<div class="split">` +
     `<div class="split-col split-img">` +
