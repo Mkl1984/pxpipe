@@ -1,23 +1,24 @@
 # pxpipe
 
-**Cut Claude Code input-token spend by rendering bulky context as images.**
+**Cut Claude Code's input tokens by rendering bulky context as images — the same system prompt, tool docs, and history, in a fraction of the tokens.**
 
-Anthropic bills an image by its pixel dimensions, not by how much text is
-inside it. Dense content (code, JSON, tool output) packs ~3.1 chars per
+An image's token cost is fixed by its pixel dimensions, not by how much
+text is inside it. Dense content (code, JSON, tool output) packs ~3.1 chars per
 image-token vs ~1 char per text-token on real Claude Code traffic. pxpipe is a
 local proxy that exploits that gap: it rewrites the bulky parts of your
 request (system prompt, tool docs, older history) into compact PNGs before
 the request leaves your machine.
 
 Savings are **workload-dependent** — pxpipe wins on token-dense content and
-leaves sparse/small requests untouched — so this is a measured snapshot, not a
-constant. Across production traces the **end-to-end bill drops ~59–70%**
-(**~72–74%** on the requests it actually compresses), with full dollar math:
-input + cache writes at 1.25× + cache reads at 0.1× + output at 5×, every
-request measured against its own `count_tokens` counterfactual. Two snapshots: a
-13,709-request log turned $100 into ~$41 (59% end-to-end; ~$28 / 72% on the
-7,756 it compressed); a later 8,904-compressed-request trace measured ~70%
-end-to-end / ~74% compressed. Reproduce it on your own traffic from
+leaves sparse/small requests untouched — so these are measured snapshots, not
+constants. The primary, durable result is **input-token reduction**: dense
+system prompts, tool docs, and history go in as compact images instead of text
+(the example above is ≈25k text tokens rendered as ≈2.7k image tokens), every
+request measured against its own `count_tokens` counterfactual. **Dollars are
+downstream of that** — at current Fable list prices the token cut lands as a
+**~59–70% lower end-to-end bill** (~72–74% on compressed requests; full pricing
+math in the FAQ). But list prices can change tomorrow and the token count
+won't, so tokens — not dollars — are the number to watch. Reproduce both from
 `~/.pxpipe/events.jsonl`.
 
 This is what the model sees instead of text:

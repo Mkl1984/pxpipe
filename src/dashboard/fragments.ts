@@ -181,7 +181,7 @@ export function renderSessionSummaryFragment(data: CurrentSessionPayload): strin
     `<div class="hero-headline"><span class="hero-num">${bigNum}</span> ${word} sent to Claude</div>` +
     `<div class="hero-sub">` +
     `<strong>${kFmt(ppTotal)}</strong> tokens actually sent vs <strong>${kFmt(textTotal)}</strong> if it were all plain text. ` +
-    `Your messages and Claude's replies are never compressed.` +
+    `Your latest messages and Claude's live output are never compressed.` +
     `</div>` +
     `<div class="hero-meta">` +
     `Input context compressed <b class="${inputPct >= 0 ? 'good' : 'bad'}">${inputPct.toFixed(0)}%</b> ` +
@@ -254,7 +254,7 @@ export function renderHeaderFragment(s: StatsPayload, port: number): string {
       numFmt(s.saved_input_tokens),
       'vs sending the same context as text',
       'pos',
-      'Bulky context (system prompt, tool output, old turns) sent as compact images instead of text. Cache-aware, input side only — your replies are never compressed.',
+      'Bulky context (system prompt, tool output, old turns) sent as compact images instead of text. Cache-aware, input side only — recent turns and the live output stay text.',
     ) +
     statTile(
       'Estimated saved',
