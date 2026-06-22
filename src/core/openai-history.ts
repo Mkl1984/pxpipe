@@ -281,6 +281,11 @@ export async function planGptCollapse(
   const text = joinTurns(turns, pp, rawEnd, pinIdx);
   // Floor gate in o200k TOKENS, not chars: imaging bills vision tokens and the
   // text baseline is o200k tokens, so the break-even is a token comparison.
+  // NOTE: this counts the IMAGEABLE work only (pin excluded), so a small history
+  // whose non-pin content is below the floor is left fully as text. That is correct,
+  // not a regression: the pinned request stays legible either way, and imaging a
+  // sub-floor amount of work would cost more vision tokens than it saves. Only long
+  // sessions (where the bug lived) clear the floor and collapse.
   if (!text || gptCountTokens(text) < o.minCollapseTokens) {
     return { ...base, reason: 'below_min_tokens', collapsedChars: text?.length ?? 0 };
   }

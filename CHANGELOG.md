@@ -4,6 +4,28 @@ All notable changes to pxpipe are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) (pre-1.0: minor = features /
 behavioral changes, patch = fixes).
 
+## 0.6.3 — 2026-06-22
+
+### Fixed
+- **GPT autonomous agents no longer lose the live request to history imaging.**
+  Autonomous GPT agents (OpenCode/gpt-5.5) send one human request then a long run of
+  tool turns. The lone request is the oldest turn, so history collapse imaged it first
+  and the model lost it — confabulating the request and drifting off-task (observed:
+  editing a file instead of answering a compare question). Fix: the most-recent user
+  turn *overall* is kept as legible text, spliced between before-pin and after-pin
+  history images inside the synthetic user message; older user turns stay imaged (they
+  must not look live). The `developer` guard now echoes the request verbatim. History
+  stays imaged on both sides of the pin, so compression barely changes. Both Chat
+  Completions and Responses paths. GPT support remains opt-in/WIP (hidden in the
+  dashboard), so this does not affect the Anthropic path. (`openai-history.ts`,
+  `openai.ts`)
+
+  Cache safety (adversarially reviewed): the pin fires only when the latest user turn
+  is *inside* the collapse range — otherwise it is already native text in the kept
+  tail — so the pin's position is fixed across a run and the before/after section grid
+  stays byte-stable. An undersized before-pin remainder merges into the previous
+  section rather than emitting a sub-threshold (net-negative) image.
+
 ## 0.6.2 — 2026-06-22
 
 ### Fixed
