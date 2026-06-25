@@ -13,6 +13,7 @@
 
 import type { CacheControl, ContentBlock, ImageBlock, Message, TextBlock, ToolUseBlock, ToolResultBlock } from './types.js';
 import { DENSE_CONTENT_CHARS_PER_IMAGE, DENSE_CONTENT_COLS, DENSE_RENDER_STYLE, neutralizeSentinel, reflow, renderTextToPngsWithCharLimit, roleSlotSegment, SLOT_MARK_ASSISTANT, SLOT_MARK_USER } from './render.js';
+import { factSheetText } from './factsheet.js';
 import { bytesToBase64 } from './png.js';
 
 /**
@@ -479,10 +480,12 @@ export async function collapseHistory(
     return { messages, info };
   }
   const latestUserPointer = latestCollapsedUserPointer(messages, collapseLen, protectedPrefix);
+  const historyFactSheet = factSheetText(text);
   const syntheticContent: ContentBlock[] = [
     { type: 'text', text: HISTORY_SYNTHETIC_INTRO },
     ...imageBlocks,
     ...(latestUserPointer ? [latestUserPointer] : []),
+    ...(historyFactSheet ? [{ type: 'text' as const, text: historyFactSheet }] : []),
     { type: 'text', text: HISTORY_SYNTHETIC_OUTRO },
   ];
   const syntheticUser: Message = {

@@ -123,11 +123,13 @@ describe('design: HISTORY COLLAPSE (Anthropic)', () => {
     );
     const hay = JSON.stringify(out);
     expect(imageCount(out)).toBeGreaterThan(0);
-    // Recent turns survive as text (the working set the model still reasons over).
-    expect(hay).toContain('TURNMARK_29 ');
-    expect(hay).toContain('TURNMARK_28 ');
-    // A mid-history turn was collapsed into an image → not present as text.
-    expect(hay).not.toContain('TURNMARK_5 ');
+    // Recent turns survive as legible text BODY (the working set the model still reasons over).
+    expect(hay).toContain('TURNMARK_29 ' + 'x'.repeat(100));
+    expect(hay).toContain('TURNMARK_28 ' + 'x'.repeat(100));
+    // A mid-history turn's BODY was collapsed into an image → its content is not legible text.
+    // Its bare identifier may appear in the verbatim fact-sheet beside the image (by design —
+    // precision-critical tokens are preserved as text); the 4000-char body is not.
+    expect(hay).not.toContain('TURNMARK_5 ' + 'x'.repeat(100));
   });
 });
 

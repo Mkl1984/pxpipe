@@ -413,7 +413,10 @@ describe('transformOpenAIResponses — history collapse', () => {
     expect((out.input[historyIdx + 1] as { role?: string }).role).toBe('developer');
     expect(JSON.stringify(out.input[historyIdx + 1])).toContain('live current request');
     const serialized = JSON.stringify(out.input);
-    expect(serialized).not.toContain(OPENING_PROMPT_MARKER);
+    // The opening prompt's BODY was collapsed into an image → its legible text is gone.
+    // Its bare marker may surface once in the verbatim fact-sheet beside the image (by
+    // design — precision-critical ids are kept as text); the repeated body does not.
+    expect(serialized).not.toContain(`${OPENING_PROMPT_MARKER} ${OPENING_PROMPT_MARKER}`);
     expect(serialized).toContain(LIVE_PROMPT_MARKER);
     // The recent tail is still raw text items (function_call / user), not collapsed.
     const lastUser = [...out.input].reverse().find(
@@ -501,7 +504,10 @@ describe('transformOpenAIChatCompletions — history collapse', () => {
     expect((out.messages[historyIdx + 1] as { role?: string }).role).toBe('developer');
     expect(JSON.stringify(out.messages[historyIdx + 1])).toContain('live current request');
     const serialized = JSON.stringify(out.messages);
-    expect(serialized).not.toContain(OPENING_PROMPT_MARKER);
+    // The opening prompt's BODY was collapsed into an image → its legible text is gone.
+    // Its bare marker may surface once in the verbatim fact-sheet beside the image (by
+    // design — precision-critical ids are kept as text); the repeated body does not.
+    expect(serialized).not.toContain(`${OPENING_PROMPT_MARKER} ${OPENING_PROMPT_MARKER}`);
     expect(serialized).toContain(LIVE_PROMPT_MARKER);
   });
 });

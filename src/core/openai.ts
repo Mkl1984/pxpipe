@@ -36,6 +36,7 @@ import {
   type GptHistoryOptions,
 } from './openai-history.js';
 import { HISTORY_SYNTHETIC_INTRO, HISTORY_SYNTHETIC_OUTRO } from './history.js';
+import { factSheetText } from './factsheet.js';
 import { countTokens as o200kCountTokens } from 'gpt-tokenizer/encoding/o200k_base';
 
 // Per-model GPT rendering + vision-cost profiles (portrait-strip width, image-token
@@ -673,10 +674,15 @@ export async function transformOpenAIChatCompletions(
   info.imagePngs = images.map((img) => img.png);
   info.imageDims = images.map((img) => ({ width: img.width, height: img.height }));
 
+  // Verbatim fact-sheet: precision-critical tokens (paths, ids, versions, flags)
+  // pulled from the pre-image text so exact strings survive OCR loss. Deterministic
+  // → stays inside the cached prefix. See src/core/factsheet.ts.
+  const slabFactSheet = factSheetText(combinedRaw);
   const slabUserMsg: OpenAIChatMessage = {
     role: 'user',
     content: [
       ...imageParts,
+      ...(slabFactSheet ? [{ type: 'text', text: slabFactSheet } as OpenAIContentPart] : []),
       { type: 'text', text: '[End of rendered GPT system/tool context.]' },
     ],
   };
@@ -716,6 +722,9 @@ export async function transformOpenAIChatCompletions(
         content.push({ type: 'text', text: pinnedRequestBlock(plan.pinText) });
         for (const img of plan.imagesAfter) content.push(openAIImagePart(img));
       }
+      // Verbatim fact-sheet for the imaged transcript (exact ids survive OCR loss).
+      const histFactSheet = factSheetText(plan.text);
+      if (histFactSheet) content.push({ type: 'text', text: histFactSheet });
       content.push({ type: 'text', text: HISTORY_TRANSCRIPT_OUTRO });
       const synthetic: OpenAIChatMessage = { role: 'user', content };
       const guard: OpenAIChatMessage = {
@@ -870,6 +879,11 @@ export async function transformOpenAIResponses(
 
   const imagePartsResp: ResponsesInputImagePart[] = images.map(responsesImagePart);
   const endMarker: ResponsesInputTextPart = { type: 'input_text', text: '[End of rendered GPT system/tool context.]' };
+  // Verbatim fact-sheet (see src/core/factsheet.ts): exact tokens that survive OCR loss.
+  const slabFactSheet = factSheetText(combinedRaw);
+  const slabFactSheetPart: ResponsesInputTextPart[] = slabFactSheet
+    ? [{ type: 'input_text', text: slabFactSheet }]
+    : [];
 
   if (inputWasString) {
     // Wrap bare string input into a user item with images prepended.
@@ -877,6 +891,7 @@ export async function transformOpenAIResponses(
       role: 'user',
       content: [
         ...imagePartsResp,
+        ...slabFactSheetPart,
         endMarker,
         { type: 'input_text', text: originalInputString! },
       ],
@@ -887,7 +902,7 @@ export async function transformOpenAIResponses(
     // and protecting it made stale first-turn requests look live.
     const slabUserItem: ResponsesInputItem = {
       role: 'user',
-      content: [...imagePartsResp, endMarker],
+      content: [...imagePartsResp, ...slabFactSheetPart, endMarker],
     };
     inputItems = [
       ...inputItems.slice(0, firstUserIdx),
@@ -940,6 +955,9 @@ export async function transformOpenAIResponses(
         content.push({ type: 'input_text', text: pinnedRequestBlock(plan.pinText) });
         for (const img of plan.imagesAfter) content.push(responsesImagePart(img));
       }
+      // Verbatim fact-sheet for the imaged transcript (exact ids survive OCR loss).
+      const histFactSheet = factSheetText(plan.text);
+      if (histFactSheet) content.push({ type: 'input_text', text: histFactSheet });
       content.push({ type: 'input_text', text: HISTORY_TRANSCRIPT_OUTRO });
       const synthetic: ResponsesInputItem = { role: 'user', content };
       const guard: ResponsesInputItem = {

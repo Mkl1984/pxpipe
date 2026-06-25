@@ -34,6 +34,7 @@ import {
   DENSE_RENDER_STYLE,
   renderTextToPngsWithCharLimit,
 } from './render.js';
+import { factSheetText } from './factsheet.js';
 import { bytesToBase64 } from './png.js';
 import { collapseHistory, HISTORY_SYNTHETIC_INTRO } from './history.js';
 import type { GptHistoryOptions } from './openai-history.js';
@@ -1597,6 +1598,8 @@ export async function transformRequest(
             processedExisting.push(out as ImageBlock);
             info.imageBytes += approxBlockBytes(img);
           }
+          const reminderFactSheet = factSheetText(reminderRaw);
+          if (reminderFactSheet) processedExisting.push({ type: 'text', text: reminderFactSheet });
           info.imagePixels = (info.imagePixels ?? 0) + pixels;
           info.reminderImgs = (info.reminderImgs ?? 0) + imgs.length;
           await recordRecoverable(info, o.emitRecoverable, {
@@ -1616,8 +1619,10 @@ export async function transformRequest(
         processedExisting.push(...existing);
       }
 
+      const slabFactSheet = factSheetText(combinedRaw);
       m.content = [
         ...imageBlocks,
+        ...(slabFactSheet ? [{ type: 'text' as const, text: slabFactSheet }] : []),
         { type: 'text' as const, text: '[End of rendered context.]' },
         ...processedExisting,
       ];
@@ -1681,7 +1686,11 @@ export async function transformRequest(
                 for (const [cp, n] of dcp) {
                   droppedCodepoints.set(cp, (droppedCodepoints.get(cp) ?? 0) + n);
                 }
-                rewritten.push({ ...tr, content: imgs });
+                const trFactSheet = factSheetText(innerRaw);
+                rewritten.push({
+                  ...tr,
+                  content: trFactSheet ? [...imgs, { type: 'text' as const, text: trFactSheet }] : imgs,
+                });
                 changed = true;
                 bumpBucket(info, toolResultBucket(classifyContent(inner)), innerRaw.length);
               }
@@ -1738,6 +1747,8 @@ export async function transformRequest(
                   newInner.push(out as ImageBlock);
                   info.imageBytes += approxBlockBytes(img);
                 }
+                const partFactSheet = factSheetText(innerTextRaw);
+                if (partFactSheet) newInner.push({ type: 'text', text: partFactSheet });
                 info.imagePixels = (info.imagePixels ?? 0) + pixels;
                 info.toolResultImgs = (info.toolResultImgs ?? 0) + imgs.length;
                 info.imageCount += imgs.length;
