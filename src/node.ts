@@ -7,6 +7,7 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { once } from 'node:events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -198,6 +199,39 @@ function toWebRequest(req: IncomingMessage): Request {
   });
 }
 
+function isConnectionAbort(err: unknown): boolean {
+  const e = err as {
+    name?: unknown;
+    message?: unknown;
+    code?: unknown;
+    cause?: { code?: unknown; message?: unknown };
+  };
+  const name = typeof e?.name === 'string' ? e.name : '';
+  const code = typeof e?.code === 'string'
+    ? e.code
+    : typeof e?.cause?.code === 'string'
+      ? e.cause.code
+      : '';
+  const message = typeof e?.message === 'string' ? e.message : '';
+  const causeMessage = typeof e?.cause?.message === 'string' ? e.cause.message : '';
+  return name === 'AbortError' ||
+    code === 'UND_ERR_SOCKET' ||
+    code === 'ECONNRESET' ||
+    code === 'EPIPE' ||
+    message === 'client response closed' ||
+    message === 'terminated' ||
+    message.includes('aborted') ||
+    causeMessage.includes('other side closed');
+}
+
+async function waitForDrain(out: ServerResponse): Promise<void> {
+  const event = await Promise.race([
+    once(out, 'drain').then(() => 'drain'),
+    once(out, 'close').then(() => 'close'),
+  ]);
+  if (event === 'close') throw new Error('client response closed');
+}
+
 async function writeWebResponse(res: Response, out: ServerResponse): Promise<void> {
   out.statusCode = res.status;
   res.headers.forEach((v, k) => out.setHeader(k, v));
@@ -206,12 +240,29 @@ async function writeWebResponse(res: Response, out: ServerResponse): Promise<voi
     return;
   }
   const reader = res.body.getReader();
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    if (value) out.write(value);
+  let finished = false;
+  const cancelBody = () => {
+    if (!finished) void reader.cancel().catch(() => undefined);
+  };
+  out.once('close', cancelBody);
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value && !out.write(value)) await waitForDrain(out);
+    }
+    if (!out.writableEnded) out.end();
+  } catch (err) {
+    if (isConnectionAbort(err) || out.destroyed || out.writableEnded) {
+      if (!out.destroyed && !out.writableEnded) out.destroy(err instanceof Error ? err : undefined);
+      return;
+    }
+    throw err;
+  } finally {
+    finished = true;
+    out.off('close', cancelBody);
+    reader.releaseLock();
   }
-  out.end();
 }
 
 /** Read the entire request body as text. Bounded at 1 MiB — every dashboard
