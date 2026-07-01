@@ -46,7 +46,10 @@ ANSWER=$(node "$EC/generate.mjs" | tee /tmp/ec-gen.log | sed -n 's/^--- expected
 echo "[4/5] start proxies (background, fresh logs)"
 : >"$LOG_ON"; : >"$LOG_OFF"
 rm -rf "$DUMP_DIR"; mkdir -p "$DUMP_DIR"   # fresh PNG dump for the pxpipe (compress) arm; the passthrough arm renders nothing
-PXPIPE_LOG="$LOG_ON"  PORT="$PORT_ON"  PXPIPE_MODELS="$MODELS" PXPIPE_DUMP_DIR="$DUMP_DIR" nohup node dist/node.js >/tmp/ec-on.log  2>&1 & disown
+# PXPIPE_TEXT_SLAB=1: keep the system prompt + tool docs as TEXT so Anthropic's safety
+# classifier can't OCR them (a legible imaged slab trips it -> forced Opus downgrade).
+# The slab is prompt-cached anyway, so imaging it saved ~nothing; bulk stays imaged.
+PXPIPE_TEXT_SLAB=1 PXPIPE_LOG="$LOG_ON"  PORT="$PORT_ON"  PXPIPE_MODELS="$MODELS" PXPIPE_DUMP_DIR="$DUMP_DIR" nohup node dist/node.js >/tmp/ec-on.log  2>&1 & disown
 PXPIPE_LOG="$LOG_OFF" PORT="$PORT_OFF" PXPIPE_MODELS="$MODELS" PXPIPE_DISABLE=1            nohup node dist/node.js >/tmp/ec-off.log 2>&1 & disown
 sleep 2
 

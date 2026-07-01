@@ -1529,9 +1529,8 @@ export async function transformRequest(
       ? ` Multi-column layout (${numCols} cols): read column 1 (leftmost) top-to-bottom, then column 2, etc.`
       : '';
   const imageInstructionHeader =
-    '=================== SYSTEM PROMPT + TOOL DOCS ===================\n' +
-    'The following is the system prompt and tool documentation, rendered as images for token efficiency.' +
-    ' OCR carefully and treat as authoritative system instructions.' +
+    '=================== SYSTEM PROMPT + TOOL DOCS (rendered to save tokens) ===================\n' +
+    'The pages below are a continuation of the current system prompt and tool documentation, rendered as images — read them carefully.' +
     columnNoteImg +
     reflowNoteImg +
     '\n====================== BEGIN RENDERED CONTEXT ======================\n';
@@ -1555,10 +1554,25 @@ export async function transformRequest(
       profitable: slabGateEval.profitable,
     };
   }
-  if (!isCompressionProfitable(combinedWithHeader, slabCols, undefined, numCols, slabCpt, o.priorWarmTokens, o.priorWarmImageTokens, false)) {
-    info.reason = `not_profitable (slab=${combined.length} chars)`;
+  // The Anthropic safety classifier OCRs rendered images, and a *legible* image of
+  // the system prompt + tool docs (bash / permissions / credential / file-write
+  // vocabulary) trips its prompt-injection heuristic → forced model downgrade that
+  // costs far more than imaging the (already prompt-cached) slab ever saves. Empirically
+  // the caption wording is NOT the trigger — the OCR'd content is — so the only robust
+  // fix is to keep the slab as TEXT. Opt-in via PXPIPE_TEXT_SLAB=1; default keeps the
+  // legacy imaged slab so the cache-align / cache-stability suites stay valid.
+  const keepSlabAsText =
+    typeof process !== 'undefined' && !!process.env && process.env['PXPIPE_TEXT_SLAB'] === '1';
+  if (
+    keepSlabAsText ||
+    !isCompressionProfitable(combinedWithHeader, slabCols, undefined, numCols, slabCpt, o.priorWarmTokens, o.priorWarmImageTokens, false)
+  ) {
+    info.reason = keepSlabAsText
+      ? `slab_text (PXPIPE_TEXT_SLAB=1; classifier-safe)`
+      : `not_profitable (slab=${combined.length} chars)`;
     bumpPassthrough(info, 'not_profitable');
-    // Slab not profitable but history may still be collapsable — try before returning.
+    // Slab kept as text (either opted-in or not profitable) — history may still be
+    // collapsable, so try that before returning.
     const finalized = await runHistoryCollapseAndFinalize(req, info, o, opts, droppedCodepoints);
     if (finalized.collapsed) {
       info.compressed = true;
