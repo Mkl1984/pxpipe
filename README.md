@@ -46,7 +46,7 @@ https://github.com/user-attachments/assets/1c8ee63a-fcd7-4958-917b-da788d718349
 
 **Opus 4.8 demo (Opus disabled by default):**
 
-[![pxpipe vs plain Claude — side-by-side A/B on Opus 4.8](https://raw.githubusercontent.com/teamchong/pxpipe/main/docs/assets/pxpipe-ab-test-thumb.jpg)](https://drive.google.com/file/d/1yZYEjr9765aswomG8mopmp3GlRdSLWM1/view?usp=sharing)
+https://github.com/user-attachments/assets/f4e50137-31b5-426f-a6ed-b83f829b4a2c
 
 *Side-by-side — plain Claude (left) vs pxpipe (right), both on **Opus 4.8** (opt-in; pxpipe is tuned for Fable — see the Fable clip above). Click the image to watch (Google Drive).*
 
